@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* PNK 码复制图标：静默灰，悬停时加深 */
+.pnk-cell .ant-typography-copy {
+  color: #8c8c8c !important;
+  transition: color 0.2s;
+}
+.pnk-cell .ant-typography-copy:hover {
+  color: #262626 !important;
+}
