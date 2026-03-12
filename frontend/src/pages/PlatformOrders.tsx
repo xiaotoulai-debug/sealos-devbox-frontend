@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Table, Button, Space, Empty, Typography, Select, Modal, Descriptions, message, Tag, Alert, Input, DatePicker,
 } from 'antd';
@@ -7,8 +8,11 @@ import type { Dayjs } from 'dayjs';
 import dayjs from 'dayjs';
 import { ReloadOutlined, ShoppingOutlined, SyncOutlined, ThunderboltOutlined, SearchOutlined, AppstoreOutlined } from '@ant-design/icons';
 import request from '../lib/request';
+import { formatPrice } from '../lib/currency';
 
 const { Text } = Typography;
+
+const SITE_ALL = '__all__';
 
 // 日期范围预设
 type DatePreset = 'today' | 'yesterday' | '30d' | 'month' | 'custom';
@@ -39,24 +43,21 @@ const STATUS_OPTIONS = [
   { label: '已取消', value: '已取消' },
 ];
 
-// 状态标签颜色：仅根据 statusText 文本判断，锁死颜色
-const STATUS_COLOR_MAP: Record<string, string> = {
-  新订单: 'blue',
-  处理中: 'processing',
-  已准备: 'cyan',
-  已退货: 'orange',
+// 状态标签颜色：eMAG 风格，与官方界面接近
+const STATUS_STYLE_MAP: Record<string, { color: string; bg: string; border?: string }> = {
+  新订单: { color: '#1677ff', bg: '#e6f4ff', border: '#91caff' },
+  处理中: { color: '#d46b08', bg: '#fff7e6', border: '#ffd591' },
+  已准备: { color: '#08979c', bg: '#e6fffb', border: '#87e8de' },
+  已退货: { color: '#cf1322', bg: '#fff2f0', border: '#ffccc7' },
+  已完成: { color: '#389e0d', bg: '#f6ffed', border: '#b7eb8f' },
+  已取消: { color: '#8c8c8c', bg: '#fafafa', border: '#d9d9d9' },
 };
 
-// statusText 包含 "已完成" -> 绿色，包含 "已取消" -> 灰色
-function getStatusColor(statusText: string): string {
+function getStatusStyle(statusText: string): { color: string; bg: string; border?: string } {
   const t = String(statusText ?? '').trim();
-  if (t.includes('已完成')) return 'success';
-  if (t.includes('已取消')) return 'default';
-  return STATUS_COLOR_MAP[t] ?? 'default';
-}
-
-function formatPrice(value: number, currency = 'RON'): string {
-  return `${Number(value).toFixed(2)} ${currency}`;
+  if (t.includes('已完成')) return STATUS_STYLE_MAP['已完成'] ?? { color: '#389e0d', bg: '#f6ffed', border: '#b7eb8f' };
+  if (t.includes('已取消')) return STATUS_STYLE_MAP['已取消'] ?? { color: '#8c8c8c', bg: '#fafafa', border: '#d9d9d9' };
+  return STATUS_STYLE_MAP[t] ?? { color: '#595959', bg: '#fafafa', border: '#d9d9d9' };
 }
 
 // 构建跳转链接：新窗口打开平台产品页面（用于 SKU / 图片点击跳转）
@@ -90,6 +91,13 @@ interface Order {
   id: number;
   orderId?: string;
   order_id?: string;
+  platform_order_id?: string;
+  emag_order_id?: string;
+  shopId?: number;
+  shop_id?: number;
+  shop?: { region?: string; site?: string };
+  region?: string | null;
+  site?: string | null;
   order_type?: number;
   type?: number;
   createdAt?: string;
@@ -129,19 +137,27 @@ interface Order {
   buyer?: { name?: string; full_name?: string };
 }
 
+type ShopRecord = { id: number; shopName: string; platform: string; region?: string | null; site?: string | null };
+
 export default function PlatformOrders() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [orders, setOrders] = useState<Order[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [shops, setShops] = useState<{ id: number; shopName: string; platform: string }[]>([]);
-  const [shopId, setShopId] = useState<number | null>(null);
+  const [shops, setShops] = useState<ShopRecord[]>([]);
+  const [selectedShopName, setSelectedShopName] = useState<string | null>(null);
+  const [selectedSite, setSelectedSite] = useState<string>(SITE_ALL);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [detailOrder, setDetailOrder] = useState<Order | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
   const [isSyncing, setIsSyncing] = useState(false);
   const isSyncingRef = useRef(false);
+  const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const prevTotalRef = useRef(0);
+  const [forceSyncCooldownUntil, setForceSyncCooldownUntil] = useState<number>(0);
+  const [cooldownSeconds, setCooldownSeconds] = useState(0);
 
   // 筛选条件
   const [filterOrderId, setFilterOrderId] = useState('');
@@ -149,27 +165,70 @@ export default function PlatformOrders() {
   const [customDateRange, setCustomDateRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('');
 
+  // 去重后的店铺名列表
+  const shopNameOptions = [...new Set(shops.map((s) => s.shopName.trim()).filter(Boolean))].map((name) => ({ label: name, value: name }));
+  // 当前店铺名下的站点选项（含全部站点）
+  const shopsForName = selectedShopName ? shops.filter((s) => s.shopName.trim() === selectedShopName) : [];
+  const siteOptions = [
+    { label: '🌍 全部站点', value: SITE_ALL },
+    ...shopsForName
+      .map((s) => (s.region ?? s.site ?? '') as string)
+      .filter(Boolean)
+      .filter((r, i, arr) => arr.indexOf(r) === i)
+      .map((r) => ({ label: r, value: r })),
+  ];
+  // 当前筛选对应的 shopIds
+  const effectiveShopIds: number[] =
+    selectedSite === SITE_ALL
+      ? shopsForName.map((s) => s.id)
+      : shopsForName.filter((s) => (s.region ?? s.site) === selectedSite).map((s) => s.id);
+  const shopIdForSync = effectiveShopIds[0] ?? null;
   const fetchShops = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
     try {
-      const { data: res } = await request.get<{ code: number; data: { id: number; shopName: string; platform: string }[] }>('/shops');
+      const { data: res } = await request.get<{ code: number; data: ShopRecord[] }>('/shops');
       const list = Array.isArray(res?.data) ? res.data : [];
       setShops(list);
       if (list.length > 0) {
-        const cached = localStorage.getItem('selectedShopId');
-        const cachedId = cached ? parseInt(cached, 10) : NaN;
-        const valid = list.some((s) => s.id === cachedId);
-        setShopId(valid && !isNaN(cachedId) ? cachedId : list[0].id);
+        const urlShop = searchParams.get('shop');
+        const urlSite = searchParams.get('site') ?? SITE_ALL;
+        const validShop = urlShop && list.some((s) => s.shopName.trim() === urlShop);
+        const firstShopName = list[0].shopName.trim();
+        setSelectedShopName(validShop ? urlShop : firstShopName);
+        if (validShop && urlSite) {
+          const shopsOfName = list.filter((s) => s.shopName.trim() === (validShop ? urlShop : firstShopName));
+          const validSite = urlSite === SITE_ALL || shopsOfName.some((s) => (s.region ?? s.site) === urlSite);
+          setSelectedSite(validSite ? urlSite : SITE_ALL);
+        } else {
+          setSelectedSite(SITE_ALL);
+        }
       }
     } catch (err) {
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status !== 401) message.error('加载店铺列表失败');
     }
-  }, []);
+  }, [searchParams]);
 
   useEffect(() => {
     isSyncingRef.current = isSyncing;
   }, [isSyncing]);
+
+  // 强制同步冷却倒计时（5 分钟）
+  const FORCE_SYNC_COOLDOWN_SEC = 300;
+  useEffect(() => {
+    if (forceSyncCooldownUntil <= 0) {
+      setCooldownSeconds(0);
+      return;
+    }
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((forceSyncCooldownUntil - Date.now()) / 1000));
+      setCooldownSeconds(left);
+      if (left <= 0) setForceSyncCooldownUntil(0);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [forceSyncCooldownUntil]);
 
   const buildFilterOpts = useCallback(() => {
     const range = getDateRangeForPreset(datePreset, customDateRange);
@@ -182,12 +241,12 @@ export default function PlatformOrders() {
   }, [filterOrderId, datePreset, customDateRange, filterStatus]);
 
   const fetchOrders = useCallback(async (
-    sid: number | null,
+    sids: number[],
     p = 1,
     ps = 50,
     opts?: { cacheBust?: boolean; overrideFilter?: { orderId?: string; startDate?: string; endDate?: string; status?: string } },
   ) => {
-    if (sid == null) {
+    if (sids.length === 0) {
       setOrders([]);
       setTotal(0);
       return;
@@ -199,7 +258,12 @@ export default function PlatformOrders() {
     }
     setLoading(true);
     try {
-      const params: Record<string, string | number> = { shopId: sid, page: p, pageSize: ps };
+      const params: Record<string, string | number> = { page: p, pageSize: ps };
+      if (sids.length === 1) {
+        params.shopId = sids[0];
+      } else {
+        params.shopIds = sids.join(',');
+      }
       if (opts?.cacheBust) params._t = Date.now();
       const filter = opts?.overrideFilter ?? buildFilterOpts();
       if (filter.orderId) params.orderId = filter.orderId;
@@ -212,6 +276,8 @@ export default function PlatformOrders() {
         total?: number;
         isSyncing?: boolean;
         is_syncing?: boolean;
+        lastSyncAt?: string;
+        last_sync_at?: string;
       }>('/orders', { params });
       if (res.code === 200) {
         const raw = res.data;
@@ -220,17 +286,24 @@ export default function PlatformOrders() {
         if ((totalVal ?? 0) > 0 && list.length === 0) {
           console.warn('[平台订单] 分页断档：总数', totalVal, '但当前页返回空数组，尝试重新请求第一页');
           setPage(1);
-          setTimeout(() => fetchOrders(sid, 1, ps, { cacheBust: true }), 300);
+          setTimeout(() => fetchOrders(sids, 1, ps, { cacheBust: true }), 300);
           return;
         }
         setOrders(list);
-        setTotal(totalVal ?? list.length);
+        const newTotal = totalVal ?? list.length;
+        setTotal(newTotal);
+        prevTotalRef.current = newTotal;
         setDataVersion((v) => v + 1);
         const syncing = (res as { isSyncing?: boolean; is_syncing?: boolean }).isSyncing ?? (res as { isSyncing?: boolean; is_syncing?: boolean }).is_syncing ?? false;
+        const apiLastSync = (res as { lastSyncAt?: string; last_sync_at?: string }).lastSyncAt ?? (res as { lastSyncAt?: string; last_sync_at?: string }).last_sync_at;
+        if (apiLastSync) {
+          setLastSyncTime(dayjs(apiLastSync).format('YYYY-MM-DD HH:mm'));
+        }
         const wasSyncing = isSyncingRef.current;
         setIsSyncing(syncing);
         if (wasSyncing && !syncing) {
-          setTimeout(() => fetchOrders(sid, 1, ps, { cacheBust: true }), 100);
+          if (!apiLastSync) setLastSyncTime(dayjs().format('YYYY-MM-DD HH:mm'));
+          setTimeout(() => fetchOrders(sids, 1, ps, { cacheBust: true }), 100);
         }
       } else {
         setOrders([]);
@@ -250,27 +323,112 @@ export default function PlatformOrders() {
     fetchShops();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 筛选变化时同步 URL
+  useEffect(() => {
+    if (!selectedShopName) return;
+    const next = new URLSearchParams(searchParams);
+    next.set('shop', selectedShopName);
+    next.set('site', selectedSite);
+    setSearchParams(next, { replace: true });
+  }, [selectedShopName, selectedSite]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     setPage(1);
-    fetchOrders(shopId, 1, pageSize);
-  }, [shopId]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchOrders(effectiveShopIds, 1, pageSize);
+  }, [selectedShopName, selectedSite]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 同步进行中时轮询，以便及时获取 isSyncing 状态变化
   useEffect(() => {
-    if (!isSyncing || !shopId) return;
+    if (!isSyncing || effectiveShopIds.length === 0) return;
     const timer = setInterval(() => {
-      fetchOrders(shopId, page, pageSize);
+      fetchOrders(effectiveShopIds, page, pageSize);
     }, 5000);
     return () => clearInterval(timer);
-  }, [isSyncing, shopId, page, pageSize, fetchOrders]);
+  }, [isSyncing, selectedShopName, selectedSite, page, pageSize, fetchOrders]);
+
+  // 定时轮询检测新订单，自动刷新并提醒
+  useEffect(() => {
+    if (effectiveShopIds.length === 0) return;
+    const timer = setInterval(async () => {
+      if (loading) return;
+      try {
+        const params: Record<string, string | number> = { page: 1, pageSize: 1 };
+        if (effectiveShopIds.length === 1) params.shopId = effectiveShopIds[0];
+        else params.shopIds = effectiveShopIds.join(',');
+        const filter = buildFilterOpts();
+        if (filter.orderId) params.orderId = filter.orderId;
+        if (filter.startDate) params.startDate = filter.startDate;
+        if (filter.endDate) params.endDate = filter.endDate;
+        if (filter.status) params.status = filter.status;
+        const { data: res } = await request.get<{ code: number; total?: number; data?: { list?: unknown[]; total?: number } }>('/orders', { params });
+        if (res.code === 200) {
+          const raw = res.data;
+          const newTotal = (res as { total?: number }).total ?? (raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { total?: number }).total : undefined) ?? 0;
+          const prev = prevTotalRef.current;
+          if (prev > 0 && newTotal > prev) {
+            const diff = newTotal - prev;
+            message.info(`发现 ${diff} 笔新订单，已为您自动刷新列表`, 4);
+            fetchOrders(effectiveShopIds, page, pageSize);
+          }
+        }
+      } catch {
+        // 静默失败
+      }
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [selectedShopName, selectedSite, page, pageSize, loading, buildFilterOpts, fetchOrders]);
 
   const handleTableChange = useCallback((pag: { current?: number; pageSize?: number } /* , _filters, _sorter, _extra */) => {
     const np = pag.current ?? 1;
     const nps = pag.pageSize ?? pageSize;
     setPage(np);
     setPageSize(nps);
-    fetchOrders(shopId, np, nps);
-  }, [shopId, pageSize, fetchOrders]);
+    fetchOrders(effectiveShopIds, np, nps);
+  }, [selectedShopName, selectedSite, pageSize, fetchOrders]);
+
+  const handleForceSync = useCallback(async () => {
+    if (effectiveShopIds.length === 0 || cooldownSeconds > 0) return;
+    setLoading(true);
+    const hideLoading = message.loading('正在从 eMAG 全欧洲站点抓取最新数据...', 0);
+    try {
+      // 请求路径：/api/orders/sync（与后端挂载一致，若 404 请核对后端路由）
+      const { data: res } = await request.post<{ code: number; message?: string }>('/orders/sync', {
+        shopIds: effectiveShopIds,
+      });
+      if (res.code !== 200) {
+        hideLoading();
+        message.error(res.message ?? '网络异常');
+        setLoading(false);
+        return;
+      }
+      hideLoading();
+      setForceSyncCooldownUntil(Date.now() + FORCE_SYNC_COOLDOWN_SEC * 1000);
+      message.success('已触发全量同步');
+      const isNarrowDate = datePreset === 'today' || datePreset === 'yesterday';
+      if (isNarrowDate) {
+        message.info('同步完成，已为您拉取最新数据。若未看到新订单，请尝试扩大日期筛选范围。', 6);
+      }
+      setDetailModalOpen(false);
+      setDetailOrder(null);
+      setPage(1);
+      setOrders([]);
+      setTotal(0);
+      setDataVersion((v) => v + 1);
+      await fetchOrders(effectiveShopIds, 1, pageSize, { cacheBust: true });
+    } catch (err: unknown) {
+      hideLoading();
+      console.error(err);
+      const e = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      if (e.response?.status === 409) {
+        message.error('当前店铺后台正在同步中，为防止数据冲突，请等待1-2分钟后再试。');
+      } else {
+        const errMsg = e.response?.data?.message || e.message || '网络异常';
+        message.error(errMsg);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedShopName, selectedSite, pageSize, fetchOrders, cooldownSeconds, datePreset]);
 
   const handleViewDetail = (order: Order) => {
     setDetailOrder(order);
@@ -279,17 +437,28 @@ export default function PlatformOrders() {
 
   const columns: ColumnsType<Order> = [
     {
+      title: '站点',
+      key: 'site',
+      width: 110,
+      align: 'center',
+      render: (_: unknown, r: Order) => {
+        const region = r.shop?.region || r.shop?.site || r.region || r.site;
+        if (!region) return <span style={{ color: '#94a3b8' }}>未知站点</span>;
+        return <span>{String(region)}</span>;
+      },
+    },
+    {
       title: '单号',
-      dataIndex: 'orderId',
+      dataIndex: 'platform_order_id',
       key: 'orderId',
       width: 180,
       render: (_: unknown, r: Order) => {
-        const id = r.orderId ?? r.order_id ?? String(r.id);
+        const id = r.emag_order_id ?? r.platform_order_id ?? r.order_id ?? r.orderId;
         const isFbe = r.order_type === 2 || r.type === 2;
         return (
           <Space size={6} wrap>
             <Button type="link" size="small" onClick={() => handleViewDetail(r)} style={{ padding: 0, fontFamily: 'monospace' }}>
-              {id}
+              {id ?? '—'}
             </Button>
             {isFbe && <Tag color="blue">FBE</Tag>}
           </Space>
@@ -312,7 +481,7 @@ export default function PlatformOrders() {
       width: 150,
       render: (_: unknown, r: Order) => {
         const v = r.amount ?? r.total ?? r.totalAmount ?? r.total_amount;
-        const c = r.currency ?? 'RON';
+        const c = r.currency ?? '';
         return (
           <Space size={4}>
             <Text strong>{v != null ? formatPrice(v, c) : '—'}</Text>
@@ -323,14 +492,29 @@ export default function PlatformOrders() {
     },
     {
       title: '订单状态',
-      dataIndex: 'statusText',
+      dataIndex: 'status_text',
       key: 'status',
-      width: 110,
+      width: 130,
       render: (_: unknown, r: Order) => {
         const statusText = r.statusText ?? r.status_text ?? r.statusLabel ?? r.status_label ?? '';
+        const rawStatus = r.status;
         const text = String(statusText).trim();
-        const color = getStatusColor(text);
-        return !text ? <span>—</span> : <Tag color={color}>{text}</Tag>;
+        const displayText = text || (rawStatus != null ? `未知状态 (${rawStatus})` : '');
+        const style = getStatusStyle(text || displayText);
+        return !displayText ? (
+          <span style={{ color: '#bfbfbf' }}>—</span>
+        ) : (
+          <Tag
+            style={{
+              color: style.color,
+              backgroundColor: style.bg,
+              borderColor: style.border,
+              border: '1px solid',
+            }}
+          >
+            {displayText}
+          </Tag>
+        );
       },
     },
   ];
@@ -338,7 +522,7 @@ export default function PlatformOrders() {
   const detailItems = detailOrder ? (detailOrder.items ?? detailOrder.products ?? []) : [];
 
   // 强制 Table 在数据更新后重新渲染状态列
-  const tableKey = `orders-${shopId}-${page}-${dataVersion}`;
+  const tableKey = `orders-${selectedShopName}-${selectedSite}-${page}-${dataVersion}`;
 
   return (
     <div>
@@ -361,34 +545,50 @@ export default function PlatformOrders() {
               style={{ margin: 0, padding: '6px 12px', fontSize: 12 }}
             />
           )}
-          <Space size="small">
-            <span className="text-sm text-gray-500">店铺：</span>
-            <Select
-              placeholder="选择店铺"
-              value={shopId ?? undefined}
-              onChange={(v) => setShopId(v ?? null)}
-              options={shops.map((s) => ({ label: `${s.shopName} (${s.platform})`, value: s.id }))}
-              style={{ minWidth: 200 }}
-            />
+          <Space size="small" wrap>
+            <Space size={4}>
+              <span className="text-sm text-gray-500">店铺：</span>
+              <Select
+                placeholder="选择店铺"
+                value={selectedShopName ?? undefined}
+                onChange={(v) => {
+                  setSelectedShopName(v ?? null);
+                  setSelectedSite(SITE_ALL);
+                }}
+                options={shopNameOptions}
+                style={{ minWidth: 140 }}
+              />
+            </Space>
+            <Space size={4}>
+              <span className="text-sm text-gray-500">站点：</span>
+              <Select
+                placeholder="选择站点"
+                value={selectedSite}
+                onChange={(v) => setSelectedSite(v ?? SITE_ALL)}
+                options={siteOptions}
+                disabled={!selectedShopName || shopsForName.length === 0}
+                style={{ minWidth: 160 }}
+              />
+            </Space>
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={() => fetchOrders(shopId, page, pageSize)} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchOrders(effectiveShopIds, page, pageSize)} loading={loading}>
             刷新
           </Button>
           <Button
             icon={<ThunderboltOutlined />}
-            onClick={() => {
-              setDetailModalOpen(false);
-              setDetailOrder(null);
-              setPage(1);
-              setOrders([]);
-              setTotal(0);
-              setDataVersion((v) => v + 1);
-              fetchOrders(shopId, 1, pageSize, { cacheBust: true });
-            }}
+            onClick={handleForceSync}
             loading={loading}
+            disabled={cooldownSeconds > 0}
           >
-            强制重加载
+            {cooldownSeconds > 0
+              ? `${Math.floor(cooldownSeconds / 60)}:${String(cooldownSeconds % 60).padStart(2, '0')} 后可再次同步`
+              : '强制重加载'}
           </Button>
+          {lastSyncTime && (
+            <span style={{ color: '#64748b', fontSize: 12 }}>
+              最近同步：{lastSyncTime}
+            </span>
+          )}
         </Space>
       </div>
 
@@ -415,7 +615,7 @@ export default function PlatformOrders() {
               onChange={(e) => setFilterOrderId(e.target.value)}
               allowClear
               style={{ width: 180 }}
-              onPressEnter={() => { setPage(1); fetchOrders(shopId, 1, pageSize); }}
+              onPressEnter={() => { setPage(1); fetchOrders(effectiveShopIds, 1, pageSize); }}
             />
           </Space>
           <Space size={4}>
@@ -473,7 +673,7 @@ export default function PlatformOrders() {
               icon={<SearchOutlined />}
               onClick={() => {
                 setPage(1);
-                fetchOrders(shopId, 1, pageSize);
+                fetchOrders(effectiveShopIds, 1, pageSize);
               }}
               loading={loading}
             >
@@ -486,7 +686,7 @@ export default function PlatformOrders() {
                 setCustomDateRange(null);
                 setFilterStatus('');
                 setPage(1);
-                fetchOrders(shopId, 1, pageSize, { overrideFilter: {} });
+                fetchOrders(effectiveShopIds, 1, pageSize, { overrideFilter: {} });
               }}
               loading={loading}
             >
@@ -501,7 +701,7 @@ export default function PlatformOrders() {
           key={tableKey}
           dataSource={orders}
           columns={columns}
-          rowKey={(r) => String(r.orderId ?? r.order_id ?? r.id)}
+          rowKey={(r) => String(r.id ?? r.platform_order_id ?? r.order_id ?? r.orderId ?? '')}
           loading={loading}
           onChange={handleTableChange}
           pagination={{
@@ -512,7 +712,7 @@ export default function PlatformOrders() {
             pageSizeOptions: ['20', '50', '100', '200'],
             showTotal: (t) => `共 ${t} 条`,
           }}
-          locale={{ emptyText: <Empty description={shopId ? '暂无订单' : '请先选择店铺'} style={{ padding: 48 }} /> }}
+          locale={{ emptyText: <Empty description={selectedShopName ? '暂无订单' : '请先选择店铺'} style={{ padding: 48 }} /> }}
         />
       </div>
 
@@ -521,7 +721,7 @@ export default function PlatformOrders() {
         title={
           <Space wrap>
             <Text strong>订单详情</Text>
-            <Text code type="secondary">{detailOrder?.orderId ?? detailOrder?.order_id ?? detailOrder?.id}</Text>
+            <Text code type="secondary">{detailOrder?.emag_order_id ?? detailOrder?.platform_order_id ?? detailOrder?.order_id ?? detailOrder?.orderId ?? '—'}</Text>
             {(detailOrder?.order_type === 2 || detailOrder?.type === 2) && (
               <Tag color="blue">FBE (eMAG发货)</Tag>
             )}
@@ -545,7 +745,7 @@ export default function PlatformOrders() {
               return amt != null ? (
                 <div style={{ marginBottom: 16 }}>
                   <Text strong>订单金额：</Text>
-                  <Text strong>{formatPrice(amt, detailOrder!.currency ?? 'RON')}</Text>
+                  <Text strong>{formatPrice(amt, detailOrder!.currency ?? '')}</Text>
                   <Text type="secondary" style={{ marginLeft: 6, fontSize: 12 }}>含税</Text>
                 </div>
               ) : null;
@@ -602,8 +802,8 @@ export default function PlatformOrders() {
                       },
                     },
                     { title: '数量', dataIndex: 'quantity', key: 'qty', width: 80 },
-                    { title: '单价', dataIndex: 'sale_price', key: 'price', width: 110, render: (v: number) => v != null ? formatPrice(v) : '—' },
-                    { title: '小计', key: 'total', width: 110, render: (_: unknown, r: OrderItem) => { const q = r.quantity ?? 0; const p = r.sale_price ?? r.price ?? 0; return (q && p) ? formatPrice(q * p) : '—'; } },
+                    { title: '单价', dataIndex: 'sale_price', key: 'price', width: 110, render: (v: number) => v != null ? formatPrice(v, detailOrder!.currency ?? '') : '—' },
+                    { title: '小计', key: 'total', width: 110, render: (_: unknown, r: OrderItem) => { const q = r.quantity ?? 0; const p = r.sale_price ?? r.price ?? 0; return (q && p) ? formatPrice(q * p, detailOrder!.currency ?? '') : '—'; } },
                   ]}
                   rowKey={(r, i) => String(r.id ?? i)}
                   pagination={false}

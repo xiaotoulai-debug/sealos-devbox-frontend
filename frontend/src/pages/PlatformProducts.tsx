@@ -1,75 +1,13 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
-import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined } from '@ant-design/icons';
+import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
 import request from '../lib/request';
+import ProductImage from '../components/ProductImage';
 
 const { Text } = Typography;
-
-// 产品图片单元格：支持重试、object-fit: contain
-function ProductImageCell({
-  url,
-  pnk,
-  shopId,
-  onRefresh,
-}: { url: string; pnk: string; shopId: number | null; onRefresh: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-
-  const handleRetry = async () => {
-    if (!pnk || !shopId) return;
-    setLoading(true);
-    try {
-      await request.post('/store-products/refresh-image', { pnk, shopId });
-      message.success('已触发重新抓取');
-      onRefresh();
-    } catch {
-      message.error('重试失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const boxStyle: React.CSSProperties = {
-    width: 60,
-    height: 60,
-    borderRadius: 8,
-    background: '#f5f5f5',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  };
-
-  if (error) {
-    return (
-      <div style={{ ...boxStyle, flexDirection: 'column', gap: 4 }}>
-        <Button type="link" size="small" loading={loading} onClick={handleRetry} style={{ padding: 0, fontSize: 11 }}>
-          重试
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div style={boxStyle}>
-      <img
-        src={url}
-        alt=""
-        style={{
-          width: 60,
-          height: 60,
-          objectFit: 'contain',
-          borderRadius: 8,
-          display: 'block',
-        }}
-        onError={() => setError(true)}
-      />
-    </div>
-  );
-}
 
 // ─── 平台产品（已上架店铺产品）───────────────────────────────────
 interface StoreProduct {
@@ -88,6 +26,8 @@ interface StoreProduct {
   mainImage?: string | null;
   imageUrl?: string | null;
   image_url?: string | null;
+  image_fetching?: boolean;
+  imageFetching?: boolean;
   productUrl?: string | null;
   product_url?: string | null;
   price?: number | null;
@@ -114,41 +54,6 @@ interface StoreProduct {
   rejectionReason?: string | null;
 }
 
-// 格式化价格：数字 + 币种（如 28.00 RON）
-function formatPrice(value: number, currency?: string | null): string {
-  const num = Number(value).toFixed(2);
-  const c = (currency ?? '').trim().toUpperCase();
-  if (!c) return num;
-  if (c === 'RON') return `${num} RON`;
-  return `${num} ${c}`;
-}
-
-// 无图片占位图（SVG 图标 + 文字）
-const NO_IMAGE_PLACEHOLDER = (
-  <div
-    style={{
-      width: 60,
-      height: 60,
-      borderRadius: 8,
-      background: '#f5f5f5',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontSize: 10,
-      color: '#94a3b8',
-      border: '1px dashed #e0e0e0',
-    }}
-  >
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ marginBottom: 2 }}>
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <circle cx="8.5" cy="8.5" r="1.5" />
-      <path d="M21 15l-5-5L5 21" />
-    </svg>
-    无图片
-  </div>
-);
-
 // 本地库存 SKU 信息（用于关联与毛利计算）
 interface LocalInventoryMap {
   imageUrl: string | null;
@@ -172,10 +77,10 @@ interface PlatformProductsProps {
 export default function PlatformProducts({ initialSearch }: PlatformProductsProps) {
   const [loading, setLoading] = useState(false);
   const [products, setProducts] = useState<StoreProduct[]>([]);
-  const [shops, setShops] = useState<{ id: number; shopName: string; platform: string }[]>([]);
+  const [shops, setShops] = useState<{ id: number; shopName: string; platform: string; region?: string | null; site?: string | null }[]>([]);
   const [shopId, setShopId] = useState<number | null>(null);
   const [inventoryMap, setInventoryMap] = useState<Record<string, LocalInventoryMap>>({});
-  const [currency, setCurrency] = useState<string>('RON');
+  const [currency, setCurrency] = useState<string>('');
   const [searchKeyword, setSearchKeyword] = useState(initialSearch ?? '');
   const [appliedKeyword, setAppliedKeyword] = useState(initialSearch ?? ''); // 实际已应用的搜索关键词
 
@@ -187,6 +92,17 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   const [mapSearchLoading, setMapSearchLoading] = useState(false);
   const [mapSelected, setMapSelected] = useState<InventoryItem | null>(null);
   const [mapSubmitting, setMapSubmitting] = useState(false);
+
+  // 手动贴图地址弹窗
+  const [pasteModalOpen, setPasteModalOpen] = useState(false);
+  const [pasteTarget, setPasteTarget] = useState<StoreProduct | null>(null);
+  const [pasteUrl, setPasteUrl] = useState('');
+  const [pasteSubmitting, setPasteSubmitting] = useState(false);
+
+  // 同步链接
+  const [syncUrlsLoading, setSyncUrlsLoading] = useState(false);
+  const [syncProductsLoading, setSyncProductsLoading] = useState(false);
+  const prevProductsCountRef = useRef(0);
 
   const fetchInventory = useCallback(async () => {
     try {
@@ -215,7 +131,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   const fetchShops = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
     try {
-      const { data: res } = await request.get<{ code: number; data: { id: number; shopName: string; platform: string }[] }>('/shops');
+      const { data: res } = await request.get<{ code: number; data: { id: number; shopName: string; platform: string; region?: string | null; site?: string | null }[] }>('/shops');
       const list = Array.isArray(res?.data) ? res.data : [];
       setShops(list);
       if (list.length > 0) {
@@ -263,9 +179,10 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
             ? (raw as { list: StoreProduct[] }).list
             : [];
         setProducts([...list]);
+        prevProductsCountRef.current = list.length;
         const dataObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as { currency?: string } : null;
-        const c = (res as { currency?: string }).currency ?? dataObj?.currency ?? (list[0] as StoreProduct | undefined)?.currency ?? 'RON';
-        setCurrency((c ?? 'RON').trim() || 'RON');
+        const c = (res as { currency?: string }).currency ?? dataObj?.currency ?? (list[0] as StoreProduct | undefined)?.currency ?? '';
+        setCurrency((c ?? '').trim() || '');
       } else {
         setProducts([]);
       }
@@ -316,6 +233,114 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     setMapSearchResults([]);
   }, []);
 
+  const openPasteModal = useCallback((product: StoreProduct) => {
+    setPasteTarget(product);
+    setPasteModalOpen(true);
+    setPasteUrl('');
+  }, []);
+
+  const closePasteModal = useCallback(() => {
+    setPasteModalOpen(false);
+    setPasteTarget(null);
+    setPasteUrl('');
+  }, []);
+
+  const handleSyncUrls = useCallback(async () => {
+    if (!shopId) return;
+    setSyncUrlsLoading(true);
+    try {
+      const { data: res } = await request.post<{ code: number; message?: string }>('/store-products/sync-urls', { shopId });
+      if (res.code === 200) {
+        await fetchProducts(shopId, appliedKeyword);
+        message.success('同步成功');
+      } else {
+        message.error(res.message ?? '网络异常');
+      }
+    } catch (err: unknown) {
+      const e = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      if (e.response?.status === 409) {
+        message.error('当前店铺后台正在同步中，为防止数据冲突，请等待1-2分钟后再试。');
+      } else {
+        const errMsg = e.response?.data?.message || e.message || '网络异常';
+        message.error(errMsg);
+      }
+    } finally {
+      setSyncUrlsLoading(false);
+    }
+  }, [shopId, appliedKeyword, fetchProducts]);
+
+  const handleSyncProducts = useCallback(async () => {
+    const selectedShopIds = shopId != null ? [shopId] : [];
+    if (!selectedShopIds.length) {
+      message.warning('请先选择需要同步的店铺或站点');
+      return;
+    }
+    setSyncProductsLoading(true);
+    const hideLoading = message.loading('正在通过双引擎深度抓取平台数据及高清图片，预计需要 1-2 分钟，请耐心等待...', 0);
+    try {
+      const payload = selectedShopIds.length === 1
+        ? { shopId: selectedShopIds[0], shopIds: selectedShopIds }
+        : { shopIds: selectedShopIds };
+      const { data: res } = await request.post<{ code: number; message?: string }>('/store-products/sync', payload, {
+        timeout: 300000,
+      });
+      hideLoading();
+      if (res.code === 200) {
+        message.success('基础产品信息已拉取完毕！高清图片正在后台加速同步中，请稍后刷新页面查看。', 5);
+      } else {
+        message.error(res.message ?? '网络异常');
+      }
+    } catch (err: unknown) {
+      hideLoading();
+      const e = err as { response?: { status?: number; data?: { message?: string } }; message?: string };
+      if (e.response?.status === 409) {
+        message.error('当前店铺后台正在同步中，为防止数据冲突，请等待1-2分钟后再试。');
+      } else {
+        const errMsg = e.response?.data?.message || e.message || '网络异常';
+        message.error(errMsg);
+      }
+    } finally {
+      setSyncProductsLoading(false);
+      if (shopId) {
+        fetchProducts(shopId, appliedKeyword, { refreshSales: true });
+      }
+    }
+  }, [shopId, appliedKeyword, fetchProducts]);
+
+  const handlePasteSubmit = useCallback(async () => {
+    if (!pasteTarget || !shopId) return;
+    const url = pasteUrl.trim();
+    if (!url) {
+      message.warning('请输入图片地址');
+      return;
+    }
+    const pnk = String(pasteTarget.pnk ?? pasteTarget.part_number_key ?? pasteTarget.partNumber ?? '').trim();
+    if (!pnk) {
+      message.error('产品 PNK 为空，无法保存');
+      return;
+    }
+    setPasteSubmitting(true);
+    try {
+      const { data: res } = await request.post<{ code: number; message?: string }>('/store-products/set-image', {
+        pnk,
+        shopId,
+        imageUrl: url,
+      });
+      if (res.code === 200) {
+        message.success('图片已保存');
+        closePasteModal();
+        fetchProducts(shopId, appliedKeyword);
+      } else {
+        message.error(res.message ?? '保存失败');
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
+      message.error(msg ?? '保存失败，请确认后端已支持 set-image 接口');
+    } finally {
+      setPasteSubmitting(false);
+    }
+  }, [pasteTarget, pasteUrl, shopId, appliedKeyword, closePasteModal, fetchProducts]);
+
   const handleMapConfirm = useCallback(async () => {
     if (!mapTarget || !mapSelected || !shopId) return;
     setMapSubmitting(true);
@@ -363,6 +388,36 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     }
   }, [shopId, initialSearch, fetchProducts]);
 
+  // 定时轮询检测新产品，自动刷新并提醒
+  useEffect(() => {
+    if (!shopId || loading) return;
+    const timer = setInterval(async () => {
+      try {
+        const params: Record<string, string | number> = { shopId };
+        if (appliedKeyword) params.search = appliedKeyword;
+        const { data: res } = await request.get<{ code: number; data?: StoreProduct[] | { list?: StoreProduct[] } }>('/store-products', { params });
+        if (res.code === 200) {
+          const raw = res.data;
+          const list = Array.isArray(raw)
+            ? raw
+            : (raw && typeof raw === 'object' && Array.isArray((raw as { list?: StoreProduct[] }).list))
+              ? (raw as { list: StoreProduct[] }).list
+              : [];
+          const newCount = list.length;
+          const prev = prevProductsCountRef.current;
+          if (prev > 0 && newCount > prev) {
+            const diff = newCount - prev;
+            message.info(`发现 ${diff} 个新产品，已为您自动刷新列表`, 4);
+            fetchProducts(shopId, appliedKeyword);
+          }
+        }
+      } catch {
+        // 静默失败
+      }
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [shopId, appliedKeyword, loading, fetchProducts]);
+
   // 映射弹窗：搜索防抖
   useEffect(() => {
     if (!mapModalOpen) return;
@@ -378,46 +433,56 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       width: 90,
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
-        const platformUrl = r.main_image ?? r.mainImage ?? r.imageUrl ?? r.image_url;
-        const skuKey = String(r.sku ?? '').trim().toUpperCase();
-        const local = inventoryMap[skuKey];
-        const url = (local?.imageUrl && local.imageUrl.trim()) ? local.imageUrl : (platformUrl && typeof platformUrl === 'string' && platformUrl.trim() ? platformUrl : null);
-        if (!url) return NO_IMAGE_PLACEHOLDER;
-        const pnk = String(r.pnk ?? '').trim();
-        return (
-          <ProductImageCell
-            url={url}
-            pnk={pnk}
-            shopId={shopId}
-            onRefresh={() => fetchProducts(shopId, appliedKeyword)}
-          />
-        );
+        const url = r.main_image;
+        return <ProductImage url={url && typeof url === 'string' ? url.trim() : null} />;
       },
     },
     {
       title: '产品名称',
       dataIndex: 'title',
       key: 'title',
-      ellipsis: true,
-      width: 400,
+      ellipsis: { showTitle: false },
+      width: 460,
       render: (_: unknown, r: StoreProduct) => {
         const name = r.title ?? r.name ?? r.product_name ?? r.productName ?? '';
         const partNumber = r.part_number ?? r.partNumber ?? '';
-        const link = r.productUrl ?? r.product_url;
+        const link = r.product_url ?? r.productUrl;
+        const linkStr = link && typeof link === 'string' ? link.trim() : '';
+        const titleContent = name || '-';
         return (
-        <div>
           <div>
-            <Text strong ellipsis style={{ maxWidth: 380 }}>{name || '-'}</Text>
-            {link && (
-              <a href={link} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-500 ml-1">
-                查看
-              </a>
+            {linkStr ? (
+              <Tooltip title={`点击跳转：${titleContent}`} placement="topLeft" mouseEnterDelay={0.4}>
+                <a
+                  href={linkStr}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'block',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    textOverflow: 'ellipsis',
+                    maxWidth: 432,
+                    color: '#1890ff',
+                    cursor: 'pointer',
+                    fontSize: 14,
+                    fontWeight: 500,
+                    lineHeight: 1.5,
+                    textDecoration: 'none',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.textDecoration = 'underline'; e.currentTarget.style.textUnderlineOffset = '3px'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.textDecoration = 'none'; e.currentTarget.style.textUnderlineOffset = 'unset'; }}
+                >
+                  {titleContent}
+                </a>
+              </Tooltip>
+            ) : (
+              <Text strong ellipsis style={{ maxWidth: 432, display: 'block' }}>{titleContent}</Text>
+            )}
+            {partNumber && (
+              <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 4 }}>内部 PN：{partNumber}</div>
             )}
           </div>
-          {partNumber && (
-            <div className="text-gray-400 text-xs mt-1">内部 PN：{partNumber}</div>
-          )}
-        </div>
         );
       },
     },
@@ -425,7 +490,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       title: 'SKU',
       dataIndex: 'sku',
       key: 'sku',
-      width: 200,
+      width: 240,
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
         const sku = String(r.sku ?? '').trim();
@@ -516,8 +581,11 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
         const v = r.price ?? r.sale_price ?? r.salePrice;
-        const c = r.currency ?? currency;
-        return <span>{v != null ? formatPrice(v, c) : '-'}</span>;
+        const c = r.currency ?? '';
+        if (v == null) return <span>—</span>;
+        const num = Number(v).toFixed(2);
+        const suffix = (c ?? '').trim();
+        return <span>{suffix ? `${num} ${suffix}` : num}</span>;
       },
     },
     {
@@ -531,9 +599,11 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         const cost = inventoryMap[skuKey]?.purchasePrice;
         if (price == null || cost == null) return <span style={{ color: '#94a3b8' }}>—</span>;
         const profit = Number(price) - Number(cost);
-        const c = r.currency ?? currency;
+        const c = r.currency ?? '';
+        const num = profit.toFixed(2);
+        const suffix = (c ?? '').trim();
         const color = profit >= 0 ? '#52c41a' : '#ff4d4f';
-        return <span style={{ fontWeight: 600, color, fontFeatureSettings: '"tnum"' }}>{formatPrice(profit, c)}</span>;
+        return <span style={{ fontWeight: 600, color, fontFeatureSettings: '"tnum"' }}>{suffix ? `${num} ${suffix}` : num}</span>;
       },
     },
     {
@@ -547,7 +617,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         return <span>{v != null ? v : '-'}</span>;
       },
     },
-  ], [inventoryMap, shopId, appliedKeyword, fetchProducts, currency, openMapModal]);
+  ], [inventoryMap, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal]);
 
   return (
     <div>
@@ -567,7 +637,13 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               placeholder="选择店铺"
               value={shopId ?? undefined}
               onChange={(v) => setShopId(v ?? null)}
-              options={shops.map((s) => ({ label: `${s.shopName} (${s.platform})`, value: s.id }))}
+              options={shops.map((s) => {
+                const region = s.region ?? s.site;
+                return {
+                  label: region ? `${s.shopName} (${s.platform} · ${region})` : `${s.shopName} (${s.platform})`,
+                  value: s.id,
+                };
+              })}
               style={{ minWidth: 200 }}
             />
           </Space>
@@ -619,6 +695,23 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         >
           重置
         </Button>
+        <Button
+          icon={<LinkOutlined />}
+          onClick={handleSyncUrls}
+          loading={syncUrlsLoading}
+          disabled={!shopId}
+        >
+          同步链接
+        </Button>
+        <Button
+          type="primary"
+          icon={<DownloadOutlined />}
+          onClick={handleSyncProducts}
+          loading={syncProductsLoading}
+          disabled={!shopId}
+        >
+          ⬇️ 拉取平台产品
+        </Button>
       </div>
 
       <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
@@ -631,6 +724,34 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           locale={{ emptyText: <Empty description={shopId ? '暂无平台产品' : '请先选择店铺'} style={{ padding: 48 }} /> }}
         />
       </div>
+
+      {/* 手动贴图地址弹窗 */}
+      <Modal
+        title="贴图片地址"
+        open={pasteModalOpen}
+        onCancel={closePasteModal}
+        footer={[
+          <Button key="cancel" onClick={closePasteModal}>取消</Button>,
+          <Button key="submit" type="primary" loading={pasteSubmitting} onClick={handlePasteSubmit}>
+            保存
+          </Button>,
+        ]}
+        width={420}
+        destroyOnClose
+      >
+        {pasteTarget && (
+          <div style={{ marginBottom: 12, padding: '10px 12px', background: '#f8fafc', borderRadius: 8, fontSize: 13, color: '#64748b' }}>
+            产品：{String(pasteTarget.title ?? pasteTarget.name ?? pasteTarget.product_name ?? '').trim() || '—'}（PNK: {String(pasteTarget.pnk ?? '').trim() || '—'}）
+          </div>
+        )}
+        <Input.TextArea
+          placeholder="粘贴官网图片地址（如 https://...）"
+          value={pasteUrl}
+          onChange={(e) => setPasteUrl(e.target.value)}
+          rows={3}
+          style={{ fontFamily: 'ui-monospace, monospace', fontSize: 13 }}
+        />
+      </Modal>
 
       {/* 手动绑定库存 SKU 弹窗 */}
       <Modal

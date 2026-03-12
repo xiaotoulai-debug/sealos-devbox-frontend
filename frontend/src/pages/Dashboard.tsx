@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import dayjs, { type Dayjs } from 'dayjs';
 import request from '../lib/request';
+import { formatCurrencySuffix } from '../lib/currency';
 import PublicPool from './PublicPool';
 import PrivatePool from './PrivatePool';
 import ProcurementPlanning from './ProcurementPlanning';
@@ -12,6 +13,7 @@ import AlibabaSettings from './AlibabaSettings';
 import ShopAuth from './ShopAuth';
 import PlatformProducts from './PlatformProducts';
 import PlatformOrders from './PlatformOrders';
+import SyncStatusBar from '../components/SyncStatusBar';
 import {
   Layout, Menu, Avatar, Dropdown, Tag, Badge,
   Typography, Space, Button, Statistic, DatePicker, Spin, Select, Alert,
@@ -144,6 +146,17 @@ interface ShopOption {
   id: number;
   shopName: string;
   platform: string;
+  region?: string | null;
+  site?: string | null;
+}
+
+const REGION_DISPLAY: Record<string, string> = { RO: '🇷🇴 罗马尼亚', BG: '🇧🇬 保加利亚', HU: '🇭🇺 匈牙利' };
+function shopLabel(s: ShopOption): string {
+  const region = s.region ?? s.site;
+  if (s.platform === 'eMAG' && region && REGION_DISPLAY[region]) {
+    return `${s.shopName} (${s.platform} · ${REGION_DISPLAY[region]})`;
+  }
+  return `${s.shopName} (${s.platform})`;
 }
 
 // ── 仪表盘 stats API 响应类型 ─────────────────────────────────
@@ -153,6 +166,7 @@ interface DashboardStatsData {
   gmv?: number;
   awaitingAcknowledge?: number;
   awaiting_acknowledge?: number;
+  currency?: string | null;
 }
 
 // ── 趋势图单日数据 ─────────────────────────────────────────────
@@ -372,6 +386,10 @@ export default function Dashboard() {
   const awaitingAcknowledge = stats ? (stats.awaitingAcknowledge ?? stats.awaiting_acknowledge ?? 0) : 0;
   const isAllZero = totalOrders === 0 && gmv === 0 && awaitingAcknowledge === 0;
 
+  // 货币 100% 依赖后端 API 返回的 currency 字段
+  const statsCurrency = (stats as DashboardStatsData)?.currency ?? '';
+  const currencySuffix = formatCurrencySuffix(statsCurrency);
+
   const trendChartLabel = {
     today: '今日',
     '7d': '近 7 日',
@@ -478,8 +496,9 @@ export default function Dashboard() {
         </Header>
 
         {/* ── 内容区 ── */}
-        <Content className="bg-gray-50 min-h-screen" style={{ padding: 32, overflowY: 'auto' }}>
-
+        <Content className="bg-gray-50 min-h-screen" style={{ overflowY: 'auto' }}>
+          <SyncStatusBar shopId={shopId} />
+          <div style={{ padding: 32 }}>
           {/* 仪表盘首页 */}
           {activeKey === 'dashboard' && (
             <>
@@ -501,7 +520,7 @@ export default function Dashboard() {
                       size="small"
                       value={shopId ?? undefined}
                       onChange={(v) => handleShopChange(v ?? null)}
-                      options={shops.map((s) => ({ label: `${s.shopName} (${s.platform})`, value: s.id }))}
+                      options={shops.map((s) => ({ label: shopLabel(s), value: s.id }))}
                       style={{ minWidth: 180 }}
                       placeholder="选择店铺"
                     />
@@ -580,7 +599,7 @@ export default function Dashboard() {
                           <Statistic
                             value={statsLoading ? '-' : gmv}
                             precision={2}
-                            suffix=" RON"
+                            suffix={currencySuffix ? ` ${currencySuffix}` : undefined}
                             valueStyle={{ fontSize: 22, fontWeight: 700, color: '#1e293b', lineHeight: 1.2 }}
                           />
                         </div>
@@ -658,13 +677,13 @@ export default function Dashboard() {
                         tick={{ fontSize: 11, fill: '#94a3b8' }}
                         axisLine={false}
                         tickLine={false}
-                        tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k RON`}
+                        tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k${currencySuffix ? ` ${currencySuffix}` : ''}`}
                       />
                       <ReTooltip
                         contentStyle={{ borderRadius: 10, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.06)', fontSize: 12 }}
                         formatter={(value: number | undefined, name: string) => {
                           const v = Number(value ?? 0) || 0;
-                          return name === 'sales_amount' ? [`${v.toFixed(2)} RON`, '销售额'] : [v, '订单量'];
+                          return name === 'sales_amount' ? [`${v.toFixed(2)}${currencySuffix ? ` ${currencySuffix}` : ''}`, '销售额'] : [v, '订单量'];
                         }}
                         labelFormatter={(label) => `日期: ${label}`}
                       />
@@ -726,6 +745,7 @@ export default function Dashboard() {
           {/* 1688 配置 */}
           {activeKey === 'alibaba-settings' && <AlibabaSettings />}
 
+          </div>
         </Content>
       </Layout>
     </Layout>

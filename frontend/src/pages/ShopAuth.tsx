@@ -1,13 +1,13 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   Table, Tag, Button, Modal, Input, Space, message,
-  Empty, Switch, Tooltip, Steps, Result, Spin, Popconfirm, Badge,
+  Empty, Switch, Tooltip, Steps, Result, Spin, Popconfirm, Badge, Select,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
 import {
   PlusOutlined, SafetyCertificateOutlined, DeleteOutlined,
   CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined,
-  LinkOutlined, ShopOutlined, ExclamationCircleOutlined,
+  LinkOutlined, ShopOutlined, ExclamationCircleOutlined, EditOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
 
@@ -17,6 +17,8 @@ interface ShopRecord {
   id: number;
   platform: string;
   shopName: string;
+  region?: string | null;
+  site?: string | null;
   businessModel: string;
   apiKey: string;
   apiSecret: string;
@@ -27,6 +29,29 @@ interface ShopRecord {
   status: string;
   isSandbox: boolean;
   createdAt: string;
+}
+
+// eMAG 站点选项
+const EMAG_SITE_OPTIONS = [
+  { value: 'RO', label: '罗马尼亚', flag: '🇷🇴' },
+  { value: 'BG', label: '保加利亚', flag: '🇧🇬' },
+  { value: 'HU', label: '匈牙利', flag: '🇭🇺' },
+];
+
+// 站点映射（表格渲染用）
+const SITE_MAP: Record<string, string> = {
+  RO: '🇷🇴 罗马尼亚',
+  BG: '🇧🇬 保加利亚',
+  HU: '🇭🇺 匈牙利',
+};
+
+// 判断凭证是否为脱敏/占位（未真实修改）
+function isMaskedUsername(val: string | undefined): boolean {
+  return !val || String(val).includes('****');
+}
+function isMaskedPassword(val: string | undefined): boolean {
+  const s = String(val ?? '').trim();
+  return s === '' || s === '........' || s === '********' || /^\.+$/.test(s);
 }
 
 // ─── 平台配置 ────────────────────────────────────────────────────
@@ -147,11 +172,14 @@ export default function ShopAuth() {
   const [shops, setShops]       = useState<ShopRecord[]>([]);
   const [loading, setLoading]   = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<ShopRecord | null>(null);
 
   const fetchShops = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: res } = await request.get<{ code: number; data: ShopRecord[] }>('/shops');
+      const { data: res } = await request.get<{ code: number; data: ShopRecord[] }>('/shops', {
+        params: { _t: Date.now() },
+      });
       setShops(Array.isArray(res.data) ? res.data : []);
     } catch { message.error('加载店铺列表失败'); }
     finally { setLoading(false); }
@@ -194,6 +222,13 @@ export default function ShopAuth() {
           )}
         </div>
       ),
+    },
+    {
+      title: '站点', dataIndex: 'region', key: 'region', width: 120, align: 'center',
+      render: (_: unknown, r: ShopRecord) => {
+        if (r.platform !== 'eMAG') return <span style={{ color: '#bfbfbf' }}>—</span>;
+        return <span>{SITE_MAP[r.region as string] || '—'}</span>;
+      },
     },
     {
       title: '店铺名称', dataIndex: 'shopName', width: 200,
@@ -243,10 +278,13 @@ export default function ShopAuth() {
       },
     },
     {
-      title: '操作', key: 'actions', width: 140, fixed: 'right',
+      title: '操作', key: 'actions', width: 160, fixed: 'right',
       render: (_: unknown, r: ShopRecord) => (
         <Space size={4}>
           <Tooltip title="验证连接"><Button type="text" icon={<SafetyCertificateOutlined style={{ color: '#2563eb' }} />} onClick={() => handleVerify(r.id)} /></Tooltip>
+          <Tooltip title="编辑">
+            <Button type="text" icon={<EditOutlined style={{ color: '#2563eb' }} />} onClick={() => { setEditingRecord(r); setModalOpen(true); }} />
+          </Tooltip>
           <Popconfirm title="确定要删除此店铺授权吗？" onConfirm={() => handleDelete(r.id)} okText="确定" cancelText="取消">
             <Tooltip title="删除"><Button type="text" danger icon={<DeleteOutlined />} /></Tooltip>
           </Popconfirm>
@@ -268,7 +306,7 @@ export default function ShopAuth() {
         </div>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchShops} loading={loading}>刷新</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingRecord(null); setModalOpen(true); }}
             style={{ boxShadow: '0 2px 8px rgba(37,99,235,0.3)' }}
           >
             新增授权
@@ -279,24 +317,36 @@ export default function ShopAuth() {
       <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
         <Table<ShopRecord>
           dataSource={shops} columns={columns} rowKey="id" loading={loading}
-          pagination={false} scroll={{ x: 1200 }}
+          pagination={false} scroll={{ x: 1320 }}
           locale={{ emptyText: <Empty description="暂无授权店铺" style={{ padding: 40 }} /> }}
         />
       </div>
 
-      <AddShopModal open={modalOpen} onCancel={() => setModalOpen(false)} onDone={() => { setModalOpen(false); fetchShops(); }} />
+      <AddShopModal
+        open={modalOpen}
+        editRecord={editingRecord}
+        onCancel={() => { setModalOpen(false); setEditingRecord(null); }}
+        onDone={() => { setModalOpen(false); setEditingRecord(null); fetchShops(); }}
+      />
     </div>
   );
 }
 
-// ─── 新增店铺弹窗 (分步向导) ───────────────────────────────────
+// ─── 新增/编辑店铺弹窗 (分步向导) ───────────────────────────────────
 
-interface AddShopModalProps { open: boolean; onCancel: () => void; onDone: () => void; }
+interface AddShopModalProps {
+  open: boolean;
+  editRecord?: ShopRecord | null;
+  onCancel: () => void;
+  onDone: () => void;
+}
 
-function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
+function AddShopModal({ open, editRecord, onCancel, onDone }: AddShopModalProps) {
+  const isEdit = !!editRecord;
   const [step, setStep]           = useState(0);
   const [platform, setPlatform]   = useState('');
   const [shopName, setShopName]   = useState('');
+  const [site, setSite]           = useState<string>('RO');
   const [isSandbox, setIsSandbox] = useState(false);
   const [fields, setFields]       = useState<Record<string, string>>({});
   const [verifying, setVerifying] = useState(false);
@@ -304,8 +354,32 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
   const [saving, setSaving]       = useState(false);
 
   useEffect(() => {
-    if (open) { setStep(0); setPlatform(''); setShopName(''); setIsSandbox(false); setFields({}); setVerifyResult(null); }
-  }, [open]);
+    if (open) {
+      if (editRecord) {
+        setStep(1);
+        setPlatform(editRecord.platform);
+        setShopName(editRecord.shopName ?? '');
+        setSite((editRecord.region ?? editRecord.site ?? 'RO') as string);
+        setIsSandbox(editRecord.isSandbox ?? false);
+        setFields({
+          apiKey: editRecord.apiKey ?? '',
+          apiSecret: editRecord.apiSecret ?? '',
+          accessToken: editRecord.accessToken ?? '',
+          refreshToken: editRecord.refreshToken ?? '',
+          supplierId: editRecord.supplierId ?? '',
+        });
+        setVerifyResult(null);
+      } else {
+        setStep(0);
+        setPlatform('');
+        setShopName('');
+        setSite('RO');
+        setIsSandbox(false);
+        setFields({});
+        setVerifyResult(null);
+      }
+    }
+  }, [open, editRecord]);
 
   const pDef = platformDef(platform);
   const pFields = PLATFORM_FIELDS[platform] ?? PLATFORM_FIELDS.Other;
@@ -314,33 +388,77 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
 
   const handleSave = async () => {
     if (!shopName.trim()) { message.warning('请填写店铺名称'); return; }
-    for (const f of currentFields) {
-      if (f.required && !fields[f.key]?.trim()) { message.warning(`请填写 ${f.label}`); return; }
+    if (platform === 'eMAG' && !site) { message.warning('请选择站点区域'); return; }
+    if (!isEdit) {
+      for (const f of currentFields) {
+        if (f.required && !fields[f.key]?.trim()) { message.warning(`请填写 ${f.label}`); return; }
+      }
+    } else {
+      for (const f of currentFields) {
+        if (f.required) {
+          const val = fields[f.key]?.trim() ?? '';
+          if (f.key === 'apiKey' && isMaskedUsername(val)) continue;
+          if (f.key === 'apiSecret' && isMaskedPassword(val)) continue;
+          if (!val) { message.warning(`请填写 ${f.label}`); return; }
+        }
+      }
     }
     setSaving(true);
     try {
       const payload: Record<string, unknown> = {
         platform, shopName: shopName.trim(), isSandbox,
         businessModel: pDef?.bizModel ?? 'TRADITIONAL',
-        apiKey: fields.apiKey ?? '', apiSecret: fields.apiSecret ?? '',
-        accessToken: fields.accessToken || undefined,
-        refreshToken: fields.refreshToken || undefined,
-        supplierId: fields.supplierId || undefined,
       };
-      const { data: res } = await request.post<{ code: number; data: { id: number }; message: string }>('/shops', payload);
-      if (res.code === 200) {
-        const shopId = res.data.id;
-        setStep(2);
-        setVerifying(true);
-        try {
-          const { data: vr } = await request.post<{ code: number; data: { verified: boolean; detail: string } }>(`/shops/${shopId}/verify`);
-          setVerifyResult(vr.data);
-        } catch {
-          setVerifyResult({ verified: false, detail: '验证请求失败，请稍后手动验证' });
+      if (platform === 'eMAG') { payload.region = site; payload.site = site; }
+      if (isEdit) {
+        if (!isMaskedUsername(fields.apiKey)) payload.apiKey = fields.apiKey ?? '';
+        if (!isMaskedPassword(fields.apiSecret)) payload.apiSecret = fields.apiSecret ?? '';
+        if (fields.accessToken?.trim() && !isMaskedPassword(fields.accessToken)) payload.accessToken = fields.accessToken;
+        if (fields.refreshToken?.trim() && !isMaskedPassword(fields.refreshToken)) payload.refreshToken = fields.refreshToken;
+        if (fields.supplierId?.trim()) payload.supplierId = fields.supplierId;
+      } else {
+        payload.apiKey = fields.apiKey ?? '';
+        payload.apiSecret = fields.apiSecret ?? '';
+        payload.accessToken = fields.accessToken || undefined;
+        payload.refreshToken = fields.refreshToken || undefined;
+        payload.supplierId = fields.supplierId || undefined;
+      }
+      if (isEdit && editRecord?.id) {
+        const url = `/api/shops/${editRecord.id}`;
+        console.log('Sending Update Request to:', url, 'Method: PUT', 'Data:', payload);
+        const { data: res } = await request.put<{ code: number; message?: string }>(`/shops/${editRecord.id}`, payload);
+        if (res.code === 200) {
+          message.success('更新成功');
+          onDone();
+        } else {
+          const errMsg = res.message ?? '';
+          const isCredErr = /凭证|账号|密码|auth|invalid|unauthorized/i.test(String(errMsg));
+          message.error(isCredErr ? 'API账号或密码错误，请重新输入真实的凭证' : errMsg);
         }
-        setVerifying(false);
-      } else { message.error(res.message); }
-    } catch { message.error('保存失败'); }
+      } else {
+        const { data: res } = await request.post<{ code: number; data: { id: number }; message: string }>('/shops', payload);
+        if (res.code === 200) {
+          const shopId = res.data.id;
+          setStep(2);
+          setVerifying(true);
+          try {
+            const { data: vr } = await request.post<{ code: number; data: { verified: boolean; detail: string } }>(`/shops/${shopId}/verify`);
+            setVerifyResult(vr.data);
+          } catch {
+            setVerifyResult({ verified: false, detail: '验证请求失败，请稍后手动验证' });
+          }
+          setVerifying(false);
+        } else { message.error(res.message); }
+      }
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? '';
+      const isCredentialError = /凭证|账号|密码|auth|invalid|unauthorized/i.test(String(msg));
+      if (isEdit && isCredentialError) {
+        message.error('API账号或密码错误，请重新输入真实的凭证');
+      } else {
+        message.error(msg || (isEdit ? '更新失败' : '保存失败'));
+      }
+    }
     finally { setSaving(false); }
   };
 
@@ -349,7 +467,7 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
       title={
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <LinkOutlined style={{ color: '#2563eb', fontSize: 18 }} />
-          <span style={{ fontWeight: 600, fontSize: 16 }}>新增店铺授权</span>
+          <span style={{ fontWeight: 600, fontSize: 16 }}>{isEdit ? '更新店铺授权' : '新增店铺授权'}</span>
         </div>
       }
       open={open} onCancel={onCancel} width={680} destroyOnClose maskClosable={false}
@@ -358,10 +476,10 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
           <Button type="primary" size="large" onClick={onDone} style={{ minWidth: 120 }}>完成</Button>
         ) : (
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <Button onClick={step === 0 ? onCancel : () => setStep(step - 1)} size="large">
+            <Button onClick={step === 0 ? onCancel : () => setStep(step - 1)} size="large" disabled={isEdit && step === 1}>
               {step === 0 ? '取消' : '上一步'}
             </Button>
-            {step === 0 && (
+            {step === 0 && !isEdit && (
               <Button type="primary" size="large" disabled={!platform}
                 onClick={() => setStep(1)} style={{ minWidth: 100 }}>
                 下一步
@@ -370,23 +488,26 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
             {step === 1 && (
               <Button type="primary" size="large" loading={saving}
                 onClick={handleSave} style={{ minWidth: 140, boxShadow: '0 2px 8px rgba(37,99,235,0.3)' }}>
-                保存并验证
+                {isEdit ? '保存更新' : '保存并验证'}
               </Button>
             )}
           </div>
         )
       }
     >
-      <Steps current={step} size="small" style={{ marginBottom: 28 }}
-        items={[
-          { title: '选择平台' },
-          { title: '填写凭证' },
-          { title: '验证结果' },
-        ]}
-      />
+      {!isEdit && (
+        <Steps current={step} size="small" style={{ marginBottom: 28 }}
+          items={[
+            { title: '选择平台' },
+            { title: '填写凭证' },
+            { title: '验证结果' },
+          ]}
+        />
+      )}
 
       {/* ── Step 0: 选择平台 ── */}
       {step === 0 && (
+        <div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
           {PLATFORMS.map((p) => {
             const selected = platform === p.key;
@@ -431,6 +552,24 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
             );
           })}
         </div>
+        {/* eMAG 选中时立即显示站点选择 */}
+        {platform === 'eMAG' && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+              站点区域 <span style={{ color: '#ff4d4f' }}>*</span>
+            </div>
+            <Select
+              size="large"
+              value={site}
+              onChange={setSite}
+              options={EMAG_SITE_OPTIONS.map((o) => ({ value: o.value, label: `${o.flag} ${o.label}` }))}
+              style={{ width: '100%' }}
+              placeholder="请选择站点区域"
+              allowClear={false}
+            />
+          </div>
+        )}
+        </div>
       )}
 
       {/* ── Step 1: 填写凭证 ── */}
@@ -451,6 +590,24 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
             </div>
           )}
 
+          {/* eMAG 站点区域 */}
+          {platform === 'eMAG' && (
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
+                站点区域 <span style={{ color: '#ff4d4f' }}>*</span>
+              </div>
+              <Select
+                size="large"
+                value={site}
+                onChange={setSite}
+                options={EMAG_SITE_OPTIONS.map((o) => ({ value: o.value, label: `${o.flag} ${o.label}` }))}
+                style={{ width: '100%' }}
+                placeholder="请选择站点区域"
+                allowClear={false}
+              />
+            </div>
+          )}
+
           {/* 店铺名称 */}
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#334155', marginBottom: 6 }}>
@@ -458,7 +615,7 @@ function AddShopModal({ open, onCancel, onDone }: AddShopModalProps) {
             </div>
             <Input
               size="large" value={shopName} onChange={(e) => setShopName(e.target.value)}
-              placeholder={`例如：我的${platform}${isFullyManaged ? '全托管' : ''}店`} maxLength={50}
+              placeholder={`例如：我的${platform}${platform === 'eMAG' ? ` · ${EMAG_SITE_OPTIONS.find((o) => o.value === site)?.label ?? ''}` : ''}${isFullyManaged ? '全托管' : ''}店`} maxLength={50}
             />
           </div>
 
