@@ -1,11 +1,11 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  Table, Tag, Button, Tooltip, message, Empty, Image, Typography,
+  Table, Tag, Button, Tooltip, message, Empty, Image, Typography, Drawer, Timeline, Space, Spin,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import {
   SettingOutlined, ReloadOutlined, ShoppingOutlined,
-  SearchOutlined, LinkOutlined,
+  SearchOutlined, LinkOutlined, SyncOutlined, CarOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
 
@@ -23,16 +23,49 @@ interface PurchaseOrder {
   createdAt:   string;
 }
 
+interface LogisticsItem {
+  time?: string;
+  desc?: string;
+  status?: string;
+}
+
 interface OrderProduct {
-  id:               number;
-  pnk:              string;
-  sku:              string | null;
-  chineseName:      string | null;
-  imageUrl:         string | null;
-  purchaseUrl:      string | null;
-  purchasePrice:    number | null;
-  purchaseQuantity: number | null;
-  price:            number | null;
+  id:                   number;
+  pnk:                  string;
+  sku:                  string | null;
+  chineseName:          string | null;
+  imageUrl:             string | null;
+  purchaseUrl:          string | null;
+  purchasePrice:        number | null;
+  purchaseQuantity:     number | null;
+  price:                number | null;
+  externalOrderId?:     string | null;  // 1688 订单号（与后端 DB 字段一致）
+  alibabaOrderStatus?:  string | null;
+  alibabaTotalAmount?:  number | null;
+  shippingFee?:         number | null;
+  logisticsCompany?:    string | null;
+  logisticsNo?:         string | null;
+}
+
+// 归一化：兼容后端返回 camelCase 或 snake_case
+function normalizeOrderProduct(raw: Record<string, unknown>): OrderProduct {
+  return {
+    id: raw.id as number,
+    pnk: (raw.pnk ?? '') as string,
+    sku: (raw.sku ?? null) as string | null,
+    chineseName: (raw.chineseName ?? raw.chinese_name ?? null) as string | null,
+    imageUrl: (raw.imageUrl ?? raw.image_url ?? null) as string | null,
+    purchaseUrl: (raw.purchaseUrl ?? raw.purchase_url ?? null) as string | null,
+    purchasePrice: (raw.purchasePrice ?? raw.purchase_price ?? null) as number | null,
+    purchaseQuantity: (raw.purchaseQuantity ?? raw.purchase_quantity ?? null) as number | null,
+    price: (raw.price ?? null) as number | null,
+    externalOrderId: (raw.externalOrderId ?? raw.external_order_id ?? raw.alibabaOrderId ?? raw.alibaba_order_id ?? null) as string | null | undefined,
+    alibabaOrderStatus: (raw.alibabaOrderStatus ?? raw.alibaba_order_status ?? null) as string | null | undefined,
+    alibabaTotalAmount: (raw.alibabaTotalAmount ?? raw.alibaba_total_amount ?? null) as number | null | undefined,
+    shippingFee: (raw.shippingFee ?? raw.shipping_fee ?? null) as number | null | undefined,
+    logisticsCompany: (raw.logisticsCompany ?? raw.logistics_company ?? null) as string | null | undefined,
+    logisticsNo: (raw.logisticsNo ?? raw.logistics_no ?? null) as string | null | undefined,
+  };
 }
 
 // ─── 状态标签映射 ────────────────────────────────────────────
@@ -43,14 +76,28 @@ const STATUS_MAP: Record<string, { label: string; color: string }> = {
   RECEIVED:   { label: '已入库', color: 'green' },
 };
 
+const ALIBABA_STATUS_MAP: Record<string, { label: string; color: string }> = {
+  wait_buyer_pay:   { label: '待付款', color: 'orange' },
+  wait_seller_send: { label: '待发货', color: 'blue' },
+  seller_send:      { label: '已发货', color: 'cyan' },
+  seller_part_send: { label: '部分发货', color: 'blue' },
+  finish:           { label: '交易完成', color: 'green' },
+  cancel:           { label: '交易关闭', color: 'default' },
+  closed:           { label: '交易关闭', color: 'default' },
+};
+
 // ─── 主组件 ──────────────────────────────────────────────────
 
 export default function ProcurementManagement() {
-  const [orders,   setOrders]   = useState<PurchaseOrder[]>([]);
-  const [loading,  setLoading]  = useState(false);
-  const [page,     setPage]     = useState(1);
-  const [pageSize, setPageSize] = useState(20);
-  const [total,    setTotal]    = useState(0);
+  const [orders,       setOrders]       = useState<PurchaseOrder[]>([]);
+  const [loading,      setLoading]      = useState(false);
+  const [page,         setPage]         = useState(1);
+  const [pageSize,     setPageSize]     = useState(20);
+  const [total,        setTotal]        = useState(0);
+  const [batchSyncingId, setBatchSyncingId] = useState<number | null>(null);
+  const [logisticsOpen, setLogisticsOpen] = useState(false);
+  const [logisticsExternalOrderId, setLogisticsExternalOrderId] = useState<string | null>(null);
+  const [subRefreshKey, setSubRefreshKey] = useState(0);
 
   const fetchOrders = useCallback(async (p: number, ps: number) => {
     setLoading(true);
@@ -77,6 +124,45 @@ export default function ProcurementManagement() {
     setPageSize(ns);
     fetchOrders(np, ns);
   }, [fetchOrders, pageSize]);
+
+  const handleBatchSync = useCallback(async (orderId: number) => {
+    setBatchSyncingId(orderId);
+    try {
+      const { data: res } = await request.get<{ code: number; data?: unknown[] }>(`/orders/${orderId}/products`);
+      const raw = Array.isArray(res?.data) ? res.data : [];
+      const products = raw.map((r) => normalizeOrderProduct(typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {}));
+      const ids = [...new Set(products.map((p) => p.externalOrderId).filter((id): id is string => Boolean(id)))];
+      if (ids.length === 0) {
+        message.info('该采购单下暂无 1688 子单');
+        return;
+      }
+      let ok = 0;
+      for (const externalOrderId of ids) {
+        const { data: syncRes } = await request.post<{ code: number; message?: string }>(
+          '/procurement/sync-1688-order',
+          { externalOrderId },
+        );
+        if (syncRes?.code === 200) ok++;
+      }
+      message.success(`已同步 ${ok}/${ids.length} 个子单`);
+      fetchOrders(page, pageSize);
+      setSubRefreshKey((k) => k + 1);
+    } catch {
+      message.error('同步失败，请检查网络');
+    } finally {
+      setBatchSyncingId(null);
+    }
+  }, [page, pageSize, fetchOrders]);
+
+  const handleOpenLogistics = useCallback((externalOrderId: string) => {
+    setLogisticsExternalOrderId(externalOrderId);
+    setLogisticsOpen(true);
+  }, []);
+
+  const handleCloseLogistics = useCallback(() => {
+    setLogisticsOpen(false);
+    setLogisticsExternalOrderId(null);
+  }, []);
 
   // ── 主表列定义 ──
 
@@ -117,13 +203,36 @@ export default function ProcurementManagement() {
         return <Tag color={cfg.color} bordered={false} style={{ fontWeight: 600, borderRadius: 6 }}>{cfg.label}</Tag>;
       },
     },
-  ], []);
+    {
+      title: '操作', key: 'actions', width: 120, fixed: 'right',
+      render: (_: unknown, record: PurchaseOrder) => {
+        const isSyncing = batchSyncingId === record.id;
+        return (
+          <Button
+            type="link"
+            size="small"
+            icon={<SyncOutlined spin={isSyncing} />}
+            loading={isSyncing}
+            disabled={isSyncing}
+            onClick={() => handleBatchSync(record.id)}
+          >
+            一键同步
+          </Button>
+        );
+      },
+    },
+  ], [handleBatchSync, batchSyncingId]);
 
   // ── 嵌套子表 ──
 
   const expandedRowRender = useCallback((record: PurchaseOrder) => (
-    <OrderProductsTable orderId={record.id} />
-  ), []);
+    <OrderProductsTable
+      orderId={record.id}
+      refreshKey={subRefreshKey}
+      onOpenLogistics={handleOpenLogistics}
+      onSyncSuccess={() => setSubRefreshKey((k) => k + 1)}
+    />
+  ), [subRefreshKey, handleOpenLogistics]);
 
   return (
     <div className="min-h-full">
@@ -147,6 +256,7 @@ export default function ProcurementManagement() {
           columns={columns}
           loading={loading}
           size="large"
+          scroll={{ x: 1100 }}
           onChange={handlePageChange}
           expandable={{ expandedRowRender }}
           pagination={{
@@ -159,29 +269,157 @@ export default function ProcurementManagement() {
           rowClassName="align-middle"
         />
       </div>
+
+      <LogisticsDrawer
+        open={logisticsOpen}
+        externalOrderId={logisticsExternalOrderId}
+        onClose={handleCloseLogistics}
+      />
     </div>
+  );
+}
+
+// ─── 物流抽屉 ──────────────────────────────────────────────────
+
+interface LogisticsDrawerProps {
+  open: boolean;
+  externalOrderId: string | null;
+  onClose: () => void;
+}
+
+interface LogisticsData {
+  company?: string | null;
+  trackingNo?: string | null;
+  list?: LogisticsItem[];
+}
+
+function LogisticsDrawer({ open, externalOrderId, onClose }: LogisticsDrawerProps) {
+  const [data, setData] = useState<LogisticsData | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !externalOrderId) {
+      setData(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      try {
+        const { data: res } = await request.get<{ code: number; data?: LogisticsData; message?: string }>(
+          '/procurement/1688-logistics',
+          { params: { externalOrderId } },
+        );
+        if (!cancelled && res.code === 200 && res.data) {
+          setData(res.data);
+        } else if (!cancelled) {
+          setData(null);
+        }
+      } catch {
+        if (!cancelled) setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, externalOrderId]);
+
+  const list = Array.isArray(data?.list) ? data.list : [];
+  const company = data?.company ?? '';
+  const trackingNo = data?.trackingNo ?? '';
+
+  return (
+    <Drawer
+      title="物流详情"
+      placement="right"
+      width={420}
+      open={open}
+      onClose={onClose}
+      destroyOnClose
+      styles={{ body: { paddingTop: 8 } }}
+    >
+      {loading ? (
+        <div className="flex justify-center py-12"><Spin size="large" /></div>
+      ) : (
+        <>
+          {(company || trackingNo) && (
+            <div className="mb-6 p-4 rounded-xl bg-gray-50 border border-gray-100">
+              <div className="text-sm text-gray-500 mb-1">物流公司</div>
+              <div className="font-semibold text-gray-800 text-base">{company || '—'}</div>
+              <div className="text-sm text-gray-500 mt-2 mb-1">运单号</div>
+              <Text copyable className="font-mono text-sm">{trackingNo || '—'}</Text>
+            </div>
+          )}
+          {list.length > 0 ? (
+            <Timeline
+              items={list.map((item, i) => ({
+                key: i,
+                color: i === 0 ? 'green' : 'gray',
+                children: (
+                  <div>
+                    <div className="text-gray-500 text-xs">{item.time ?? ''}</div>
+                    <div className="font-medium text-gray-800 mt-0.5">{item.desc ?? '—'}</div>
+                  </div>
+                ),
+              }))}
+            />
+          ) : (
+            !loading && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无物流信息" style={{ padding: '32px 0' }} />
+          )}
+        </>
+      )}
+    </Drawer>
   );
 }
 
 // ─── 嵌套子表：订单内产品列表 ────────────────────────────────
 
-function OrderProductsTable({ orderId }: { orderId: number }) {
+interface OrderProductsTableProps {
+  orderId: number;
+  refreshKey?: number;
+  onOpenLogistics: (externalOrderId: string) => void;
+  onSyncSuccess?: () => void;
+}
+
+function OrderProductsTable({ orderId, refreshKey = 0, onOpenLogistics, onSyncSuccess }: OrderProductsTableProps) {
   const [products, setProducts] = useState<OrderProduct[]>([]);
-  const [loading,  setLoading]  = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [syncingAlibabaId, setSyncingAlibabaId] = useState<string | null>(null);
+
+  const fetchProducts = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data: res } = await request.get<{ code: number; data?: unknown[] }>(`/orders/${orderId}/products`);
+      const raw = Array.isArray(res?.data) ? res.data : [];
+      setProducts(raw.map((r) => normalizeOrderProduct(typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {})));
+    } catch { /* silent */ }
+    finally { setLoading(false); }
+  }, [orderId]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data: res } = await request.get<{ code: number; data: OrderProduct[] }>(`/orders/${orderId}/products`);
-        if (!cancelled && res.code === 200) {
-          setProducts(Array.isArray(res.data) ? res.data : []);
-        }
-      } catch { /* silent */ }
-      finally { if (!cancelled) setLoading(false); }
-    })();
-    return () => { cancelled = true; };
-  }, [orderId]);
+    fetchProducts();
+  }, [fetchProducts, refreshKey]);
+
+  const handleSyncRow = useCallback(async (externalOrderId: string) => {
+    setSyncingAlibabaId(externalOrderId);
+    try {
+      const { data: res } = await request.post<{ code: number; message?: string }>(
+        '/procurement/sync-1688-order',
+        { externalOrderId },
+      );
+      if (res?.code === 200) {
+        message.success('同步成功');
+        fetchProducts();
+        onSyncSuccess?.();
+      } else {
+        message.error(res?.message ?? '同步失败');
+      }
+    } catch {
+      message.error('同步失败，请检查网络');
+    } finally {
+      setSyncingAlibabaId(null);
+    }
+  }, [fetchProducts, onSyncSuccess]);
 
   const subColumns = useMemo<ColumnsType<OrderProduct>>(() => [
     {
@@ -230,7 +468,68 @@ function OrderProductsTable({ orderId }: { orderId: number }) {
           : <span className="text-gray-300">—</span>;
       },
     },
-  ], []);
+    {
+      title: '1688 订单号', dataIndex: 'externalOrderId', width: 160,
+      render: (v: string | null) => v
+        ? <Text copyable style={{ fontFamily: "'Inter', monospace", fontSize: 12 }}>{v}</Text>
+        : <span className="text-gray-300">—</span>,
+    },
+    {
+      title: '平台状态', dataIndex: 'alibabaOrderStatus', width: 110, align: 'center',
+      render: (v: string | null) => {
+        if (!v) return <span className="text-gray-300">—</span>;
+        const cfg = ALIBABA_STATUS_MAP[v] ?? { label: v, color: 'default' };
+        return <Tag color={cfg.color} bordered={false} style={{ fontWeight: 500, borderRadius: 6 }}>{cfg.label}</Tag>;
+      },
+    },
+    {
+      title: '平台金额', key: 'alibabaAmount', width: 140, align: 'right',
+      render: (_: unknown, record: OrderProduct) => {
+        const amt = record.alibabaTotalAmount;
+        const fee = record.shippingFee ?? 0;
+        if (amt == null) return <span className="text-gray-300">—</span>;
+        return (
+          <span>
+            <span style={{ fontWeight: 600, color: '#1890ff', fontFeatureSettings: '"tnum"', fontSize: 13 }}>¥{amt.toFixed(2)}</span>
+            {fee > 0 && <div className="text-gray-400 text-xs mt-0.5">含运费 ¥{fee.toFixed(2)}</div>}
+          </span>
+        );
+      },
+    },
+    {
+      title: '操作', key: 'subActions', width: 160,
+      render: (_: unknown, record: OrderProduct) => {
+        const eid = record.externalOrderId;
+        if (!eid) return <span className="text-gray-300">—</span>;
+        const isSyncing = syncingAlibabaId === eid;
+        const isShipped = record.alibabaOrderStatus === 'seller_send' || record.alibabaOrderStatus === 'finish';
+        return (
+          <Space size="small">
+            <Button
+              type="link"
+              size="small"
+              icon={<SyncOutlined spin={isSyncing} />}
+              loading={isSyncing}
+              disabled={isSyncing}
+              onClick={() => handleSyncRow(eid)}
+            >
+              同步
+            </Button>
+            {isShipped && (
+              <Button
+                type="link"
+                size="small"
+                icon={<CarOutlined />}
+                onClick={() => onOpenLogistics(eid)}
+              >
+                物流
+              </Button>
+            )}
+          </Space>
+        );
+      },
+    },
+  ], [handleSyncRow, onOpenLogistics, syncingAlibabaId]);
 
   return (
     <Table
@@ -240,6 +539,7 @@ function OrderProductsTable({ orderId }: { orderId: number }) {
       loading={loading}
       pagination={false}
       size="small"
+      scroll={{ x: 1200 }}
       style={{ margin: '-4px 0' }}
     />
   );

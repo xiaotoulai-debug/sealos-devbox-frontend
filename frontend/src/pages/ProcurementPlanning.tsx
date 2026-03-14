@@ -564,7 +564,7 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
         try {
           const { data: aliRes } = await request.post<{
             code: number; message: string;
-            data: { success: boolean; aliOrderId?: string; errorCode?: string; errorMessage?: string; rawError?: string; syncedCount?: number };
+            data: { success: boolean; aliOrderId?: string; errorCode?: string; errorMessage?: string; rawError?: string; syncedCount?: number; debug_payload?: unknown };
           }>('/alibaba/create-order', {
             productIds: linkedRows.map((r) => r.id),
             addressId: selectedAddrId,
@@ -577,6 +577,7 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
             const errCode = aliRes.data?.errorCode ?? '';
             const errMsg = aliRes.data?.errorMessage ?? aliRes.message ?? '';
             const rawErr = aliRes.data?.rawError ?? '';
+            const debugPayload = aliRes.data?.debug_payload;
 
             let displayMsg = errMsg || '1688 返回了未知错误';
             if (errCode) displayMsg = `[${errCode}] ${displayMsg}`;
@@ -591,10 +592,16 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
             setAlibabaResult({ success: false, errorMessage: friendlyMsg });
             Modal.error({
               title: '1688 下单失败',
-              width: 520,
+              width: 560,
               content: (
                 <div>
                   <p style={{ fontSize: 14, marginBottom: 8 }}>{friendlyMsg}</p>
+                  {debugPayload != null && (
+                    <details open style={{ fontSize: 12, marginBottom: rawErr ? 8 : 0 }}>
+                      <summary style={{ cursor: 'pointer', marginBottom: 4, fontWeight: 600, color: '#d4380d' }}>🔍 查看发往 1688 的完整 Payload（排雷用）</summary>
+                      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 280, overflow: 'auto', background: '#fff7e6', padding: 10, borderRadius: 6, fontSize: 11, border: '1px solid #ffd591' }}>{JSON.stringify(debugPayload, null, 2)}</pre>
+                    </details>
+                  )}
                   {rawErr && (
                     <details style={{ fontSize: 12, color: '#8c8c8c' }}>
                       <summary style={{ cursor: 'pointer', marginBottom: 4 }}>查看 1688 原始返回</summary>
@@ -607,11 +614,24 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
             });
           }
         } catch (err: unknown) {
-          const errMsg = err instanceof Error ? err.message : '网络异常';
+          const axiosData = (err as { response?: { data?: { message?: string; debug_payload?: unknown } } })?.response?.data;
+          const errMsg = axiosData?.message ?? (err instanceof Error ? err.message : '网络异常');
+          const debugPayload = axiosData?.debug_payload;
           setAlibabaResult({ success: false, errorMessage: errMsg });
           Modal.error({
             title: '1688 下单请求失败',
-            content: `本地采购单已创建成功，但同步 1688 下单时出错：${errMsg}`,
+            width: 560,
+            content: (
+              <div>
+                <p style={{ fontSize: 14, marginBottom: 8 }}>本地采购单已创建成功，但同步 1688 下单时出错：{errMsg}</p>
+                {debugPayload != null && (
+                  <details open style={{ fontSize: 12, marginTop: 12 }}>
+                    <summary style={{ cursor: 'pointer', marginBottom: 4, fontWeight: 600, color: '#d4380d' }}>🔍 查看发往 1688 的完整 Payload（排雷用）</summary>
+                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 280, overflow: 'auto', background: '#fff7e6', padding: 10, borderRadius: 6, fontSize: 11, border: '1px solid #ffd591' }}>{JSON.stringify(debugPayload, null, 2)}</pre>
+                  </details>
+                )}
+              </div>
+            ),
             okText: '知道了',
           });
         }

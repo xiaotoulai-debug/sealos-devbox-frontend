@@ -228,36 +228,39 @@ export default function Dashboard() {
   const [shopId, setShopId] = useState<number | null>(null);
   const [shopsFetched, setShopsFetched] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const { data: res } = await request.get<{ code: number; data: ShopOption[] }>('/shops');
-        const list = Array.isArray(res?.data) ? res.data : [];
-        if (cancelled) return;
-        setShops(list);
-        setShopsFetched(true);
-        const cached = localStorage.getItem(SELECTED_SHOP_KEY);
-        const cachedId = cached ? parseInt(cached, 10) : NaN;
-        const validCached = list.some((s) => s.id === cachedId);
-        if (validCached && !isNaN(cachedId)) {
-          setShopId(cachedId);
-        } else if (list.length > 0) {
-          const first = list[0].id;
-          setShopId(first);
-          localStorage.setItem(SELECTED_SHOP_KEY, String(first));
-        } else {
-          setShopId(null);
-        }
-      } catch {
-        if (!cancelled) {
-          setShopId(null);
-          setShopsFetched(true);
-        }
+  const fetchShops = useCallback(async () => {
+    try {
+      const { data: res } = await request.get<{ code: number; data?: ShopOption[] | { list?: ShopOption[] } }>('/shops');
+      const raw = res?.data;
+      const list = Array.isArray(raw)
+        ? raw
+        : (raw && typeof raw === 'object' && Array.isArray((raw as { list?: ShopOption[] }).list))
+          ? (raw as { list: ShopOption[] }).list
+          : [];
+      setShops(list);
+      setShopsFetched(true);
+      console.log('=== FRONTEND SHOP DROPDOWN ===', list);
+      const cached = localStorage.getItem(SELECTED_SHOP_KEY);
+      const cachedId = cached ? parseInt(cached, 10) : NaN;
+      const validCached = list.some((s) => s.id === cachedId);
+      if (validCached && !isNaN(cachedId)) {
+        setShopId(cachedId);
+      } else if (list.length > 0) {
+        const first = list[0].id;
+        setShopId(first);
+        localStorage.setItem(SELECTED_SHOP_KEY, String(first));
+      } else {
+        setShopId(null);
       }
-    })();
-    return () => { cancelled = true; };
+    } catch {
+      setShopId(null);
+      setShopsFetched(true);
+    }
   }, []);
+
+  useEffect(() => {
+    if (activeKey === 'dashboard') fetchShops();
+  }, [activeKey, fetchShops]);
 
   const handleShopChange = (id: number | null) => {
     setShopId(id);

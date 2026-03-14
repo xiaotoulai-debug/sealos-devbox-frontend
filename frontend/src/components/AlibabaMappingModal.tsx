@@ -3,18 +3,21 @@ import { Modal, Input, Button, Tag, Radio, Spin, message, Space, Empty, Alert, D
 import { LinkOutlined, CheckCircleOutlined, DisconnectOutlined, PlusOutlined } from '@ant-design/icons';
 import request from '../lib/request';
 
-interface SpecItem {
-  specId: string;
+interface ParsedSkuItem {
+  skuId: string;
+  specId?: string;
   specName: string;
   price: number | null;
-  imageUrl: string | null;
+  stock?: number | null;
+  imageUrl?: string | null;
 }
 
 interface ParseResult {
-  offerId: string;
-  title: string;
-  imageUrl: string | null;
-  specs: SpecItem[];
+  offerId?: string;
+  title?: string;
+  imageUrl?: string | null;
+  specs?: ParsedSkuItem[];
+  list?: ParsedSkuItem[];
 }
 
 interface AlibabaMappingModalProps {
@@ -34,13 +37,16 @@ export default function AlibabaMappingModal({
   const [url,           setUrl]           = useState('');
   const [parsing,       setParsing]       = useState(false);
   const [result,        setResult]        = useState<ParseResult | null>(null);
-  const [selectedSpec,  setSelectedSpec]  = useState<string | null>(null);
+  const [parsedSkus,    setParsedSkus]    = useState<ParsedSkuItem[]>([]);
+  const [offerId,       setOfferId]       = useState<string | null>(null);
+  const [selectedSkuId, setSelectedSkuId]  = useState<string | null>(null);
   const [binding,       setBinding]       = useState(false);
   const [unbinding,     setUnbinding]     = useState(false);
   const [autoFilled,    setAutoFilled]    = useState(false);
   const [parseError,    setParseError]    = useState<string | null>(null);
   const [manualMode,    setManualMode]    = useState(false);
   const [manualSpecName, setManualSpecName] = useState('');
+  const [debugRawSku,   setDebugRawSku]   = useState<unknown>(null);
 
   const is1688Url = (u: string) => /1688\.com/.test(u) && /\d{8,}/.test(u);
 
@@ -49,12 +55,15 @@ export default function AlibabaMappingModal({
       const prefill = purchaseUrl?.trim() || '';
       setUrl(prefill);
       setResult(null);
-      setSelectedSpec(currentSpecId ?? null);
+      setParsedSkus([]);
+      setOfferId(null);
+      setSelectedSkuId(currentSpecId ?? null);
       setParsing(false);
       setAutoFilled(!!prefill);
       setParseError(null);
       setManualMode(false);
       setManualSpecName('');
+      setDebugRawSku(null);
     }
   }, [open, currentSpecId, purchaseUrl]);
 
@@ -62,22 +71,69 @@ export default function AlibabaMappingModal({
     if (!url.trim()) { message.warning('请输入 1688 商品链接'); return; }
     setParsing(true);
     setResult(null);
-    setSelectedSpec(null);
+    setParsedSkus([]);
+    setOfferId(null);
+    setSelectedSkuId(null);
     setParseError(null);
     setManualMode(false);
+    setDebugRawSku(null);
     try {
-      const { data: res } = await request.post<{ code: number; data: ParseResult | null; message: string }>(
+      const { data: res } = await request.post<{ code: number; data: ParseResult | ParsedSkuItem[] | null; message: string; debug_raw_sku?: unknown }>(
         '/alibaba/parse-link', { url: url.trim() },
       );
-      if (res.code === 200 && res.data) {
-        setResult(res.data);
+      if (res.code === 200 && res.data != null) {
+        setDebugRawSku((res as { debug_raw_sku?: unknown }).debug_raw_sku);
+        const raw = res.data;
+        let list: ParsedSkuItem[] = [];
+        let parsedOfferId: string | null = null;
+        if (Array.isArray(raw)) {
+          list = raw.map((item) => {
+            const rawItem = item as { skuId?: string; specId?: string; spec_id?: string; specName?: string; price?: number | null; stock?: number | null; imageUrl?: string | null };
+            const specIdVal = rawItem.specId ?? rawItem.spec_id ?? rawItem.skuId;
+            const skuIdVal = rawItem.skuId ?? rawItem.specId ?? String(item);
+            return {
+              skuId: skuIdVal,
+              specId: specIdVal,
+              specName: rawItem.specName ?? '',
+              price: rawItem.price ?? null,
+              stock: rawItem.stock ?? null,
+              imageUrl: rawItem.imageUrl ?? null,
+            };
+          });
+          const offerMatch = url.match(/(\d{10,})/);
+          parsedOfferId = offerMatch ? offerMatch[1] : null;
+        } else if (typeof raw === 'object') {
+          const arr = Array.isArray((raw as ParseResult).specs)
+            ? (raw as ParseResult).specs!
+            : Array.isArray((raw as ParseResult).list)
+              ? (raw as ParseResult).list!
+              : [];
+          list = arr.map((item) => {
+            const rawItem = item as { skuId?: string; specId?: string; spec_id?: string; specName?: string; price?: number | null; stock?: number | null; imageUrl?: string | null };
+            const specIdVal = rawItem.specId ?? rawItem.spec_id ?? rawItem.skuId;
+            const skuIdVal = rawItem.skuId ?? rawItem.specId ?? '';
+            return {
+              skuId: skuIdVal,
+              specId: specIdVal,
+              specName: rawItem.specName ?? '',
+              price: rawItem.price ?? null,
+              stock: rawItem.stock ?? null,
+              imageUrl: rawItem.imageUrl ?? null,
+            };
+          });
+          parsedOfferId = (raw as ParseResult).offerId ?? null;
+        }
+        setResult(raw as ParseResult);
+        setParsedSkus(list);
+        setOfferId(parsedOfferId);
         setParseError(null);
-        if (res.data.specs.length === 1) setSelectedSpec(res.data.specs[0].specId);
+        if (list.length === 1) setSelectedSkuId(list[0].skuId);
       } else {
         setParseError(res.message || '解析失败，未返回商品数据');
         const offerMatch = url.match(/(\d{10,})/);
         if (offerMatch) {
-          setResult({ offerId: offerMatch[1], title: '', imageUrl: null, specs: [] });
+          setOfferId(offerMatch[1]);
+          setResult({ offerId: offerMatch[1], specs: [], list: [] });
         }
       }
     } catch (err: unknown) {
@@ -97,23 +153,38 @@ export default function AlibabaMappingModal({
   }, [open, autoFilled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAddManualSpec = useCallback(() => {
-    if (!manualSpecName.trim() || !result) return;
+    if (!manualSpecName.trim()) return;
     const newId = `manual-${Date.now()}`;
-    setResult({
-      ...result,
-      specs: [...result.specs, { specId: newId, specName: manualSpecName.trim(), price: null, imageUrl: null }],
-    });
-    setSelectedSpec(newId);
+    const newItem: ParsedSkuItem = { skuId: newId, specName: manualSpecName.trim(), price: null, stock: null };
+    setParsedSkus((prev) => [...prev, newItem]);
+    setSelectedSkuId(newId);
     setManualSpecName('');
     setManualMode(false);
-  }, [manualSpecName, result]);
+  }, [manualSpecName]);
 
   const handleBind = useCallback(async () => {
-    if (!productId || !result) return;
+    if (!productId) return;
+    if (!selectedSkuId) {
+      message.warning('请先选择一个 1688 规格');
+      return;
+    }
+    const selectedItem = Array.isArray(parsedSkus) ? parsedSkus.find((s) => s.skuId === selectedSkuId) : null;
+    const specIdToSend = selectedItem?.specId ?? selectedSkuId;
+    const skuIdToSend = selectedItem?.skuId ?? selectedSkuId;
+    if (!specIdToSend) {
+      message.warning('所选规格缺少 specId（32位哈希），无法完成绑定');
+      return;
+    }
     setBinding(true);
     try {
+      const payload = {
+        productId,
+        offerId: offerId ?? undefined,
+        specId: specIdToSend,
+        skuId: skuIdToSend,
+      };
       const { data: res } = await request.put<{ code: number; message: string }>(
-        '/alibaba/bind', { productId, offerId: result.offerId, specId: selectedSpec },
+        '/alibaba/bind', payload,
       );
       if (res.code === 200) {
         message.success('1688 规格绑定成功');
@@ -121,7 +192,7 @@ export default function AlibabaMappingModal({
       } else { message.error(res.message); }
     } catch { message.error('绑定失败'); }
     finally { setBinding(false); }
-  }, [productId, result, selectedSpec, onDone]);
+  }, [productId, offerId, selectedSkuId, parsedSkus, onDone]);
 
   const handleUnbind = useCallback(async () => {
     if (!productId) return;
@@ -174,7 +245,7 @@ export default function AlibabaMappingModal({
               icon={<CheckCircleOutlined />}
               loading={binding}
               onClick={handleBind}
-              disabled={!result || !selectedSpec}
+              disabled={parsedSkus.length === 0}
               style={{ background: '#ff6a00', borderColor: '#ff6a00' }}
             >
               确认绑定
@@ -243,9 +314,9 @@ export default function AlibabaMappingModal({
         />
       )}
 
-      {!parsing && result && (
+      {!parsing && (result != null || parsedSkus.length > 0) && (
         <div>
-          {result.title && (
+          {result && typeof result === 'object' && (result.title || result.imageUrl) && (
             <div style={{
               background: '#f6f8fa', borderRadius: 10, padding: '14px 20px', marginBottom: 16,
               display: 'flex', alignItems: 'center', gap: 14,
@@ -253,63 +324,83 @@ export default function AlibabaMappingModal({
               {result.imageUrl && (
                 <img src={result.imageUrl} width={48} height={48}
                   style={{ borderRadius: 8, objectFit: 'cover', border: '1px solid #e8e8e8' }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                 />
               )}
               <div>
-                <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', marginBottom: 2 }}>
-                  {result.title}
-                </div>
+                {result.title && (
+                  <div style={{ fontWeight: 600, fontSize: 14, color: '#1e293b', marginBottom: 2 }}>
+                    {result.title}
+                  </div>
+                )}
                 <div style={{ fontSize: 12, color: '#8c8c8c' }}>
-                  OfferId: <b>{result.offerId}</b>
-                  {result.specs.length > 0 && <span> · 共 {result.specs.length} 个规格</span>}
+                  {offerId && <span>OfferId: <b>{offerId}</b></span>}
+                  {parsedSkus.length > 0 && <span> · 共 {parsedSkus.length} 个规格</span>}
                 </div>
               </div>
             </div>
           )}
 
-          {result.specs.length > 0 && (
+          {Array.isArray(parsedSkus) && parsedSkus.length > 0 ? (
             <>
               <div style={{ fontWeight: 600, fontSize: 13, color: '#334155', marginBottom: 10 }}>
                 请选择对应规格：
               </div>
-              <Radio.Group
-                value={selectedSpec}
-                onChange={(e) => setSelectedSpec(e.target.value)}
-                style={{ width: '100%' }}
-              >
-                <div style={{ maxHeight: 280, overflowY: 'auto', border: '1px solid #e8e8e8', borderRadius: 10 }}>
-                  {result.specs.map((spec, idx) => (
+              <div style={{ maxHeight: 320, overflowY: 'auto', border: '1px solid #e8e8e8', borderRadius: 10 }}>
+                <Radio.Group
+                  value={selectedSkuId ?? undefined}
+                  onChange={(e) => setSelectedSkuId(e.target.value)}
+                  style={{ width: '100%' }}
+                >
+                  {parsedSkus.map((item, idx) => (
                     <div
-                      key={spec.specId}
+                      key={item.skuId}
                       style={{
                         padding: '12px 16px',
-                        borderBottom: idx < result.specs.length - 1 ? '1px solid #f0f0f0' : 'none',
+                        borderBottom: idx < parsedSkus.length - 1 ? '1px solid #f0f0f0' : 'none',
                         display: 'flex', alignItems: 'center', gap: 12,
                         cursor: 'pointer', transition: 'background 0.15s',
-                        background: selectedSpec === spec.specId ? '#fff7e6' : 'transparent',
+                        background: selectedSkuId === item.skuId ? '#fff7e6' : 'transparent',
                       }}
-                      onClick={() => setSelectedSpec(spec.specId)}
+                      onClick={() => setSelectedSkuId(item.skuId)}
                     >
-                      <Radio value={spec.specId} />
-                      {spec.imageUrl && (
-                        <img src={spec.imageUrl} width={36} height={36}
+                      <Radio value={item.skuId} />
+                      {item.imageUrl && (
+                        <img src={item.imageUrl} width={36} height={36}
                           style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8' }}
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                         />
                       )}
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontWeight: 500, fontSize: 13, color: '#1e293b' }}>{spec.specName}</div>
-                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>SpecId: {spec.specId}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 500, fontSize: 13, color: '#1e293b' }}>{item.specName || '—'}</div>
+                        <div style={{ fontSize: 12, color: '#8c8c8c' }}>SKU: {item.skuId}</div>
                       </div>
-                      {spec.price != null && spec.price > 0 && (
-                        <span style={{ fontWeight: 700, color: '#d4380d', fontSize: 14, fontFeatureSettings: '"tnum"' }}>
-                          ¥{spec.price.toFixed(2)}
-                        </span>
-                      )}
+                      <div style={{ display: 'flex', gap: 24, alignItems: 'center' }}>
+                        {item.price != null && (
+                          <span style={{ fontWeight: 700, color: '#d4380d', fontSize: 14, fontFeatureSettings: '"tnum"' }}>
+                            ¥{Number(item.price).toFixed(2)}
+                          </span>
+                        )}
+                        {item.stock != null && (
+                          <span style={{ fontSize: 13, color: '#64748b', fontFeatureSettings: '"tnum"' }}>
+                            库存 {item.stock}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
-                </div>
-              </Radio.Group>
+                </Radio.Group>
+              </div>
             </>
+          ) : (
+            <Empty description="暂无匹配规格" style={{ padding: 24 }} />
+          )}
+
+          {debugRawSku != null && (
+            <details style={{ marginTop: 16, fontSize: 12 }}>
+              <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#d4380d' }}>🔍 万邦原始 SKU（排雷用）</summary>
+              <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 240, overflow: 'auto', background: '#fff7e6', padding: 10, borderRadius: 6, fontSize: 11, border: '1px solid #ffd591', marginTop: 6 }}>{JSON.stringify(debugRawSku, null, 2)}</pre>
+            </details>
           )}
 
           <Divider style={{ margin: '16px 0 12px' }} />
@@ -344,7 +435,7 @@ export default function AlibabaMappingModal({
         </div>
       )}
 
-      {!parsing && !result && !parseError && !isBound && (
+      {!parsing && parsedSkus.length === 0 && !parseError && !isBound && (
         <div style={{ textAlign: 'center', padding: '48px 0', color: '#bfbfbf' }}>
           输入 1688 链接并点击「解析链接」开始关联
         </div>

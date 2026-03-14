@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
 import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
@@ -48,6 +48,7 @@ interface StoreProduct {
   sales_14d?: number | null;
   sales30d?: number | null;
   sales_30d?: number | null;
+  comprehensive_sales?: number | null;
   validation_status?: number;
   status?: string;
   rejection_reason?: string | null;
@@ -104,6 +105,16 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   const [syncProductsLoading, setSyncProductsLoading] = useState(false);
   const prevProductsCountRef = useRef(0);
 
+  // 分页状态（受控，确保切换 pageSize 时联动刷新）
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalCount, setTotalCount] = useState(0);
+  // 服务端排序状态
+  const [sortBy, setSortBy] = useState<string | null>(null);
+  const [sortOrder, setSortOrder] = useState<'ascend' | 'descend' | null>(null);
+  // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
+  const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
+
   const fetchInventory = useCallback(async () => {
     try {
       const { data: res } = await request.get<{ code: number; data?: { list?: { sku?: string; imageUrl?: string; purchasePrice?: number }[] } }>(
@@ -146,9 +157,10 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     }
   }, []);
 
-  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean }) => {
+  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean; page?: number; pageSize?: number; sortBy?: string | null; sortOrder?: 'ascend' | 'descend' | null }) => {
     if (sid == null) {
       setProducts([]);
+      setTotalCount(0);
       return;
     }
     const token = localStorage.getItem('token');
@@ -156,21 +168,27 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       message.warning('请先登录');
       return;
     }
+    const p = opts?.page ?? 1;
+    const ps = opts?.pageSize ?? 20;
     if (opts?.refreshSales) setProducts([]);
     setLoading(true);
     try {
-      const params: Record<string, string | number> = { shopId: sid };
+      const params: Record<string, string | number> = { shopId: sid, page: p, pageSize: ps };
       const searchVal = typeof keyword === 'string' ? keyword.trim() : '';
       if (searchVal) params.search = searchVal;
+      if (opts?.sortBy) params.sortBy = opts.sortBy;
+      if (opts?.sortOrder) params.sortOrder = opts.sortOrder;
+      console.log('=== FRONTEND SORT REQUEST ===', { sortBy: opts?.sortBy, sortOrder: opts?.sortOrder, params });
       if (opts?.refreshSales) {
         params.refreshSales = 1;
         params._t = Date.now();
       }
       const { data: res } = await request.get<{
         code: number;
-        data?: StoreProduct[] | { list?: StoreProduct[]; currency?: string };
+        data?: StoreProduct[] | { list?: StoreProduct[]; total?: number; totalCount?: number; currency?: string };
         currency?: string;
       }>('/store-products', { params });
+      console.log('=== FRONTEND API RESP ===', res?.data);
       if (res.code === 200) {
         const raw = res.data;
         const list = Array.isArray(raw)
@@ -178,16 +196,20 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           : (raw && typeof raw === 'object' && Array.isArray((raw as { list?: StoreProduct[] }).list))
             ? (raw as { list: StoreProduct[] }).list
             : [];
+        const dataObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as { total?: number; totalCount?: number; currency?: string } : null;
+        const backendTotal = (typeof dataObj?.total === 'number' ? dataObj.total : typeof dataObj?.totalCount === 'number' ? dataObj.totalCount : 0) || 0;
         setProducts([...list]);
+        setTotalCount(backendTotal);
         prevProductsCountRef.current = list.length;
-        const dataObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as { currency?: string } : null;
         const c = (res as { currency?: string }).currency ?? dataObj?.currency ?? (list[0] as StoreProduct | undefined)?.currency ?? '';
         setCurrency((c ?? '').trim() || '');
       } else {
         setProducts([]);
+        setTotalCount(0);
       }
     } catch (err) {
       setProducts([]);
+      setTotalCount(0);
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status !== 401) {
         message.error('加载平台产品失败');
@@ -251,7 +273,9 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     try {
       const { data: res } = await request.post<{ code: number; message?: string }>('/store-products/sync-urls', { shopId });
       if (res.code === 200) {
-        await fetchProducts(shopId, appliedKeyword);
+        setPendingUpdateCount(0);
+        setPage(1);
+        await fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
         message.success('同步成功');
       } else {
         message.error(res.message ?? '网络异常');
@@ -267,7 +291,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     } finally {
       setSyncUrlsLoading(false);
     }
-  }, [shopId, appliedKeyword, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
 
   const handleSyncProducts = useCallback(async () => {
     const selectedShopIds = shopId != null ? [shopId] : [];
@@ -302,10 +326,12 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     } finally {
       setSyncProductsLoading(false);
       if (shopId) {
-        fetchProducts(shopId, appliedKeyword, { refreshSales: true });
+        setPendingUpdateCount(0);
+        setPage(1);
+        fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
       }
     }
-  }, [shopId, appliedKeyword, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
 
   const handlePasteSubmit = useCallback(async () => {
     if (!pasteTarget || !shopId) return;
@@ -329,7 +355,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       if (res.code === 200) {
         message.success('图片已保存');
         closePasteModal();
-        fetchProducts(shopId, appliedKeyword);
+        setPage(1);
+        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
       } else {
         message.error(res.message ?? '保存失败');
       }
@@ -339,7 +366,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     } finally {
       setPasteSubmitting(false);
     }
-  }, [pasteTarget, pasteUrl, shopId, appliedKeyword, closePasteModal, fetchProducts]);
+  }, [pasteTarget, pasteUrl, shopId, appliedKeyword, pageSize, sortBy, sortOrder, closePasteModal, fetchProducts]);
 
   const handleMapConfirm = useCallback(async () => {
     if (!mapTarget || !mapSelected || !shopId) return;
@@ -355,7 +382,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         message.success('绑定成功');
         closeMapModal();
         fetchInventory();
-        fetchProducts(shopId, appliedKeyword);
+        setPage(1);
+        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
       } else {
         message.error(res.message ?? '绑定失败');
       }
@@ -365,7 +393,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     } finally {
       setMapSubmitting(false);
     }
-  }, [mapTarget, mapSelected, shopId, appliedKeyword, closeMapModal, fetchInventory, fetchProducts]);
+  }, [mapTarget, mapSelected, shopId, appliedKeyword, pageSize, sortBy, sortOrder, closeMapModal, fetchInventory, fetchProducts]);
 
   useEffect(() => {
     fetchShops();
@@ -376,19 +404,21 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   }, [fetchInventory]);
 
   useEffect(() => {
+    setPendingUpdateCount(0);
+    setPage(1);
     const kw = initialSearch?.trim();
     if (kw) {
       setSearchKeyword(kw);
       setAppliedKeyword(kw);
-      fetchProducts(shopId, kw, { refreshSales: true });
+      fetchProducts(shopId, kw, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
     } else {
       setSearchKeyword('');
       setAppliedKeyword('');
-      fetchProducts(shopId, '', { refreshSales: true });
+      fetchProducts(shopId, '', { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
     }
   }, [shopId, initialSearch, fetchProducts]);
 
-  // 定时轮询检测新产品，自动刷新并提醒
+  // 定时轮询检测新产品，仅累加待刷新数量，不强制刷新（由用户手动触发）
   useEffect(() => {
     if (!shopId || loading) return;
     const timer = setInterval(async () => {
@@ -407,8 +437,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           const prev = prevProductsCountRef.current;
           if (prev > 0 && newCount > prev) {
             const diff = newCount - prev;
-            message.info(`发现 ${diff} 个新产品，已为您自动刷新列表`, 4);
-            fetchProducts(shopId, appliedKeyword);
+            setPendingUpdateCount((c) => c + diff);
           }
         }
       } catch {
@@ -416,7 +445,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       }
     }, 30000);
     return () => clearInterval(timer);
-  }, [shopId, appliedKeyword, loading, fetchProducts]);
+  }, [shopId, appliedKeyword, loading]);
 
   // 映射弹窗：搜索防抖
   useEffect(() => {
@@ -424,6 +453,38 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     const t = setTimeout(() => fetchInventorySearch(mapSearchKw), 300);
     return () => clearTimeout(t);
   }, [mapModalOpen, mapSearchKw, fetchInventorySearch]);
+
+  const handleRefreshFromPending = useCallback(() => {
+    if (shopId == null) return;
+    setPendingUpdateCount(0);
+    setPage(1);
+    fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
+
+  const handleTableChange = useCallback((pagination: { current?: number; pageSize?: number }, _filters: unknown, sorter: unknown, extra?: { action?: 'paginate' | 'sort' | 'filter' }) => {
+    const newPage = pagination.current ?? 1;
+    const newSize = pagination.pageSize ?? pageSize;
+    const sizeChanged = newSize !== pageSize;
+    const sorterObj = Array.isArray(sorter) ? (sorter as { field?: string | string[]; order?: string; columnKey?: string }[])[0] : (sorter as { field?: string | string[]; order?: string; columnKey?: string });
+    const rawField = sorterObj?.field;
+    const newSortBy = (rawField != null ? (Array.isArray(rawField) ? String(rawField[0]) : String(rawField)) : (sorterObj?.columnKey != null ? String(sorterObj.columnKey) : null)) ?? null;
+    const newSortOrder = (sorterObj?.order ?? null) as 'ascend' | 'descend' | null;
+    console.log('=== FRONTEND SORT REQUEST ===', { sorterRaw: sorter, sorterObj, newSortBy, newSortOrder, extra });
+    setPage(sizeChanged ? 1 : newPage);
+    setPageSize(newSize);
+    setSortBy(newSortOrder ? newSortBy : null);
+    setSortOrder(newSortOrder);
+    const sortByParam = newSortOrder ? (newSortBy || 'comprehensive_sales') : undefined;
+    const sortOrderParam = newSortOrder ?? undefined;
+    if (shopId != null) {
+      fetchProducts(shopId, appliedKeyword, {
+        page: sizeChanged ? 1 : newPage,
+        pageSize: newSize,
+        sortBy: sortByParam,
+        sortOrder: sortOrderParam,
+      });
+    }
+  }, [shopId, appliedKeyword, pageSize, fetchProducts]);
 
   const columns: ColumnsType<StoreProduct> = useMemo(() => [
     {
@@ -574,6 +635,20 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       },
     },
     {
+      title: '综合日销',
+      key: 'comprehensive_sales',
+      dataIndex: 'comprehensive_sales',
+      width: 100,
+      align: 'center',
+      sorter: true,
+      sortOrder: sortBy === 'comprehensive_sales' ? sortOrder : undefined,
+      render: (_: unknown, r: StoreProduct) => {
+        const val = r.comprehensive_sales;
+        const num = typeof val === 'number' && !Number.isNaN(val) ? val : 0;
+        return <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', fontSize: 14 }}>{num.toFixed(2)}</span>;
+      },
+    },
+    {
       title: '价格',
       dataIndex: 'price',
       key: 'price',
@@ -617,7 +692,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         return <span>{v != null ? v : '-'}</span>;
       },
     },
-  ], [inventoryMap, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal]);
+  ], [inventoryMap, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder]);
 
   return (
     <div>
@@ -647,7 +722,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               style={{ minWidth: 200 }}
             />
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchInventory(); fetchProducts(shopId, appliedKeyword, { refreshSales: true }); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder }); }} loading={loading}>
             刷新
           </Button>
         </Space>
@@ -665,7 +740,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               return;
             }
             setAppliedKeyword(searchKeyword);
-            fetchProducts(shopId, searchKeyword);
+            setPage(1);
+            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder });
           }}
           allowClear
           style={{ width: 280 }}
@@ -679,7 +755,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               return;
             }
             setAppliedKeyword(searchKeyword);
-            fetchProducts(shopId, searchKeyword);
+            setPage(1);
+            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder });
           }}
           loading={loading}
         >
@@ -689,7 +766,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           onClick={() => {
             setSearchKeyword('');
             setAppliedKeyword('');
-            fetchProducts(shopId, '');
+            setPage(1);
+            fetchProducts(shopId, '', { page: 1, pageSize, sortBy, sortOrder });
           }}
           loading={loading}
         >
@@ -714,13 +792,33 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         </Button>
       </div>
 
+      {pendingUpdateCount > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          message={`后台已同步了 ${pendingUpdateCount} 个新产品（或数据有更新）`}
+          action={
+            <Button type="primary" size="small" onClick={handleRefreshFromPending}>
+              👉 点击刷新列表
+            </Button>
+          }
+          style={{ marginBottom: 16, borderRadius: 8 }}
+        />
+      )}
       <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
         <Table<StoreProduct>
           dataSource={products}
           columns={columns}
           rowKey="id"
           loading={loading}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+          onChange={handleTableChange}
+          pagination={{
+            current: page,
+            pageSize,
+            total: totalCount,
+            showSizeChanger: true,
+            showTotal: (total) => `共 ${total} 条`,
+          }}
           locale={{ emptyText: <Empty description={shopId ? '暂无平台产品' : '请先选择店铺'} style={{ padding: 48 }} /> }}
         />
       </div>
