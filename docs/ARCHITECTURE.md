@@ -20,36 +20,40 @@
 ```
 frontend/
 ├── src/
-│   ├── pages/           # 页面级组件，按业务模块划分
-│   │   ├── Login.tsx           # 登录页（独立路由 /login）
-│   │   ├── Dashboard.tsx      # 主工作台（含多业务入口）
-│   │   ├── PlatformProducts.tsx   # 平台产品（已上架店铺产品）
-│   │   ├── PlatformOrders.tsx     # 平台订单
-│   │   ├── PublicPool.tsx        # 公海产品池
-│   │   ├── PrivatePool.tsx       # 私海产品池
-│   │   ├── InventorySKU.tsx     # 库存 SKU 管理
-│   │   ├── SupplyChain.tsx      # 供应链
-│   │   ├── ProcurementPlanning.tsx
-│   │   ├── ProcurementManagement.tsx
-│   │   ├── ShopAuth.tsx         # 店铺授权
-│   │   ├── AlibabaSettings.tsx  # 1688 映射配置
-│   │   └── UserManagement.tsx  # 用户与权限管理
+│   ├── pages/                      # 页面级组件，按业务模块划分
+│   │   ├── Login.tsx               # 登录页（独立路由 /login）
+│   │   ├── Dashboard.tsx           # 主工作台（含左侧菜单路由 + 仪表盘）
+│   │   ├── PlatformProducts.tsx    # 平台数据 / 平台产品
+│   │   ├── PlatformOrders.tsx      # 平台数据 / 平台订单
+│   │   ├── PublicPool.tsx          # 产品开发 / 公海产品池
+│   │   ├── PrivatePool.tsx         # 产品开发 / 意向产品
+│   │   ├── InventorySKU.tsx        # 产品开发 / 库存 SKU 管理
+│   │   ├── SupplyChain.tsx         # 供应链（入口页）
+│   │   ├── ProcurementPlanning.tsx # 供应采购 / 采购计划
+│   │   ├── ProcurementManagement.tsx # 供应采购 / 采购管理（含 1688 子单展开表）
+│   │   ├── ShopAuth.tsx            # 系统设置 / 店铺授权
+│   │   ├── AlibabaSettings.tsx     # 系统设置 / 1688 配置
+│   │   ├── UserManagement.tsx      # 用户管理 / 分配账号（用户列表 + 角色分配）
+│   │   └── RoleManagement.tsx      # 用户管理 / 角色管理（角色列表 + 权限树 Drawer）
 │   │
-│   ├── components/      # 可复用 UI 组件
-│   │   ├── ProductImage.tsx    # 全局产品图片（fallback/onError 容错）
-│   │   ├── AlibabaMappingModal.tsx  # 1688 映射弹窗（标准 Modal 结构）
-│   │   └── SyncStatusBar.tsx   # 同步状态栏
+│   ├── components/                 # 可复用 UI 组件
+│   │   ├── ProductImage.tsx        # 全局产品图片（fallback/onError 容错）
+│   │   ├── AlibabaMappingModal.tsx # 1688 规格关联弹窗（标准 Modal 结构）
+│   │   └── SyncStatusBar.tsx       # 全局同步状态栏
 │   │
-│   ├── lib/             # 工具与请求封装
-│   │   ├── request.ts   # Axios 实例，JWT 注入、401 跳转
-│   │   └── currency.ts  # 货币格式化（100% 依赖后端 currency 字段）
+│   ├── lib/                        # 工具与请求封装
+│   │   ├── request.ts              # Axios 实例，JWT 注入、401 跳转
+│   │   ├── auth.ts                 # 认证工具：读写 token/user/permissions，isAdminUser()，hasPermission()
+│   │   └── currency.ts             # 货币格式化（100% 依赖后端 currency 字段）
 │   │
-│   ├── assets/          # 静态资源（图片、字体等）
-│   ├── App.tsx          # 根组件，路由配置
-│   └── main.tsx         # 入口
+│   ├── assets/                     # 静态资源（图片、字体等）
+│   ├── App.tsx                     # 根组件，路由配置 + PrivateRoute 守卫（/login → Login，/dashboard → Dashboard）
+│   └── main.tsx                    # 入口
 │
-├── public/              # 静态公共资源
-├── vite.config.ts      # Vite 配置，端口 5173，/api 代理至 3001
+├── public/                         # 静态公共资源
+├── .env                            # 环境变量（含 VITE_API_URL 指向云端/生产）
+├── .env.local                      # 本地开发覆盖（VITE_API_URL 留空，走 Vite proxy）
+├── vite.config.ts                  # Vite 配置，端口 5173，/api 代理至 localhost:3001
 └── package.json
 ```
 
@@ -59,8 +63,55 @@ frontend/
 |------|------|
 | `src/pages` | 业务页面，每个文件对应一个功能模块，负责数据拉取与状态管理 |
 | `src/components` | 跨页面复用的 UI 组件，如 `ProductImage`、各类 Modal |
-| `src/lib` | 请求封装（`request`）、货币/价格格式化（`currency`）等纯逻辑工具 |
+| `src/lib` | 请求封装（`request`）、认证工具（`auth`）、货币/价格格式化（`currency`）等纯逻辑工具 |
 | `src/assets` | 图片、字体等静态资源 |
+
+**菜单路由映射（Dashboard 内部 key → 页面组件 → 权限码）**：
+
+| 菜单 key | 路径层级 | 渲染组件 | 权限码（`code`，与 DB Permission.code 严格对齐） |
+|----------|----------|----------|--------------------------------------------------|
+| `dashboard` | 仪表盘 | Dashboard 内置 | *(无，始终可见)* |
+| `pool` | 产品开发 / 公海产品 | `PublicPool` | `MENU_PUBLIC_PRODUCTS` |
+| `private-pool` | 产品开发 / 意向产品 | `PrivatePool` | `MENU_INTENT_PRODUCTS` |
+| `inventory-sku` | 产品开发 / 库存 SKU | `InventorySKU` | `MENU_INVENTORY` |
+| `platform-products` | 平台数据 / 平台产品 | `PlatformProducts` | `MENU_PLATFORM_PRODUCTS` |
+| `platform-orders` | 平台数据 / 平台订单 | `PlatformOrders` | `MENU_PLATFORM_ORDERS` |
+| `sc-planning` | 供应采购 / 采购计划 | `ProcurementPlanning` | `MENU_PURCHASE_PLAN` |
+| `sc-management` | 供应采购 / 采购管理 | `ProcurementManagement` | `MENU_PURCHASE_MANAGE` |
+| `users` | 用户管理 / 分配账号 | `UserManagement` | `MENU_ASSIGN_ACCOUNT` |
+| `roles` | 用户管理 / 角色管理 | `RoleManagement` | `MENU_ROLE_MANAGE` |
+| `shop-auth` | 系统设置 / 店铺授权 | `ShopAuth` | `MENU_SHOP_AUTH` |
+| `alibaba-settings` | 系统设置 / 1688 配置 | `AlibabaSettings` | `MENU_1688_CONFIG` |
+
+**动态权限过滤机制**：
+
+| 角色类型 | 判断依据 | 菜单行为 |
+|----------|----------|----------|
+| 超管 | `role.isAdmin === true` 或 `/me` 返回 `permissions: null` | 显示全量菜单 |
+| 普通账号 | `/me` 返回 `permissions: string[]` | 仅显示权限码在数组中的菜单项 |
+| 无权限账号 | `/me` 返回 `permissions: []` | 仅显示仪表盘 |
+
+**权限刷新流程（核心）**：
+
+```
+页面刷新/挂载
+  │
+  ├─ 初始快照：从 localStorage 读取 permissions（避免首帧闪烁）
+  │
+  ├─ useEffect → GET /api/auth/me
+  │    ├─ 成功：更新 localStorage 缓存 + 更新 React state (permissions, adminFlag)
+  │    │         → 触发 filteredMenuConfig 重新计算 → 菜单实时过滤
+  │    └─ 失败(401等)：clearAuth() + 跳转 /login
+  │
+  └─ useMemo([permissions, adminFlag]) → filterMenuItems → toAntMenuItems → <Menu />
+```
+
+- `lib/auth.ts` 的 `isAdminUser()` 判断优先级：① `role.isAdmin === true` → ② `role.name === '超级管理员'` → ③ localStorage 无 permissions 键（老会话兼容）
+- `writeAuthCache()` / `clearAuth()` 统一管理缓存，禁止外部直接操作 localStorage
+- 父级分组节点（如"产品开发"）：子节点全被过滤后自动隐藏，无需单独配置权限码
+- 后端两个接口均需返回 `permissions: string[] | null`：
+  - `POST /api/auth/login` — 登录时写入初始缓存
+  - `GET /api/auth/me` — 每次刷新时同步最新权限（**必须实现**）
 
 ---
 
