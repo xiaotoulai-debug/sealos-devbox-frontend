@@ -16,8 +16,10 @@ interface LoginResponseData {
     username: string;
     name: string;
     avatar: string | null;
-    role: { id: number; name: string };
+    role: { id: number; name: string; isAdmin?: boolean };
   };
+  // 后端返回该用户拥有的权限码数组（超管可返回 null 表示不限制）
+  permissions?: string[] | null;
 }
 
 export default function Login() {
@@ -36,6 +38,9 @@ export default function Login() {
       if (res.code === 200) {
         localStorage.setItem('token', res.data.token);
         localStorage.setItem('user', JSON.stringify(res.data.user));
+        // 存储权限码：null 表示超管（不限制），[] 表示无权限，[...] 表示具体权限列表
+        // 若后端尚未返回 permissions 字段，写入 JSON 'null' 保持向后兼容（视为超管）
+        localStorage.setItem('permissions', JSON.stringify(res.data.permissions ?? null));
         message.success(`欢迎回来，${res.data.user.name}！`);
         navigate('/dashboard');
       } else {

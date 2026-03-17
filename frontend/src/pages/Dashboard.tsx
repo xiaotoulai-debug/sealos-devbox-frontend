@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { getStoredPermissions, isAdminUser, writeAuthCache, clearAuth, type StoredUser } from '../lib/auth';
 import dayjs, { type Dayjs } from 'dayjs';
 import request from '../lib/request';
 import { formatCurrencySuffix } from '../lib/currency';
@@ -9,6 +10,7 @@ import ProcurementPlanning from './ProcurementPlanning';
 import ProcurementManagement from './ProcurementManagement';
 import InventorySKU from './InventorySKU';
 import UserManagement from './UserManagement';
+import RoleManagement from './RoleManagement';
 import AlibabaSettings from './AlibabaSettings';
 import ShopAuth from './ShopAuth';
 import PlatformProducts from './PlatformProducts';
@@ -16,7 +18,7 @@ import PlatformOrders from './PlatformOrders';
 import SyncStatusBar from '../components/SyncStatusBar';
 import {
   Layout, Menu, Avatar, Dropdown, Tag, Badge,
-  Typography, Space, Button, Statistic, DatePicker, Spin, Select, Alert,
+  Typography, Space, Button, Statistic, DatePicker, Spin, Select, Alert, message,
 } from 'antd';
 import {
   DashboardOutlined,
@@ -39,6 +41,7 @@ import {
   AppstoreOutlined,
   BarChartOutlined,
   ShoppingOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import {
   ResponsiveContainer,
@@ -84,17 +87,29 @@ function getStoredUser() {
   }
 }
 
-// ── 侧边栏菜单项 ──────────────────────────────────────────────
-const menuItems = [
-  { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
+// ── 菜单项类型（扩展了 code 字段用于权限过滤） ────────────────
+interface AppMenuItem {
+  key:       string;
+  icon?:     React.ReactNode;
+  label:     string;
+  code?:     string;           // 权限码，undefined = 无需权限（始终可见）
+  children?: AppMenuItem[];
+}
+
+// ── 全量菜单配置（含权限码） ───────────────────────────────────
+// code 对应后端 Permission 表的 code 字段，由后端通过 GET /permissions/tree 定义。
+// 父级分组节点不设 code，子节点全部被过滤后父节点自动隐藏。
+// ── 全量菜单配置（code 与后端 Permission 表 code 字段严格对齐） ─
+const ALL_MENU_ITEMS: AppMenuItem[] = [
+  { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' }, // 始终可见，无需权限码
   {
     key: 'product-dev',
     icon: <BulbOutlined />,
     label: '产品开发',
     children: [
-      { key: 'pool',          icon: <GlobalOutlined />,   label: '公海产品' },
-      { key: 'private-pool',  icon: <StarOutlined />,     label: '意向产品' },
-      { key: 'inventory-sku', icon: <DatabaseOutlined />, label: '库存 SKU' },
+      { key: 'pool',          icon: <GlobalOutlined />,   label: '公海产品', code: 'MENU_PUBLIC_PRODUCTS' },
+      { key: 'private-pool',  icon: <StarOutlined />,     label: '意向产品', code: 'MENU_INTENT_PRODUCTS'  },
+      { key: 'inventory-sku', icon: <DatabaseOutlined />, label: '库存 SKU', code: 'MENU_INVENTORY'         },
     ],
   },
   {
@@ -102,8 +117,8 @@ const menuItems = [
     icon: <BarChartOutlined />,
     label: '平台数据',
     children: [
-      { key: 'platform-products', icon: <AppstoreOutlined />, label: '平台产品' },
-      { key: 'platform-orders',   icon: <ShoppingOutlined />, label: '平台订单' },
+      { key: 'platform-products', icon: <AppstoreOutlined />, label: '平台产品', code: 'MENU_PLATFORM_PRODUCTS' },
+      { key: 'platform-orders',   icon: <ShoppingOutlined />, label: '平台订单', code: 'MENU_PLATFORM_ORDERS'   },
     ],
   },
   {
@@ -111,21 +126,76 @@ const menuItems = [
     icon: <ShoppingCartOutlined />,
     label: '供应采购',
     children: [
-      { key: 'sc-planning',   icon: <FileTextOutlined />, label: '采购计划' },
-      { key: 'sc-management', icon: <SettingOutlined />,   label: '采购管理' },
+      { key: 'sc-planning',   icon: <FileTextOutlined />, label: '采购计划', code: 'MENU_PURCHASE_PLAN'    },
+      { key: 'sc-management', icon: <SettingOutlined />,  label: '采购管理', code: 'MENU_PURCHASE_MANAGE'  },
     ],
   },
-  { key: 'users', icon: <TeamOutlined />, label: '用户管理' },
+  {
+    key: 'user-center',
+    icon: <TeamOutlined />,
+    label: '用户管理',
+    children: [
+      { key: 'users', icon: <UserOutlined />,              label: '分配账号', code: 'MENU_ASSIGN_ACCOUNT' },
+      { key: 'roles', icon: <SafetyCertificateOutlined />, label: '角色管理', code: 'MENU_ROLE_MANAGE'    },
+    ],
+  },
   {
     key: 'sys-settings',
     icon: <SettingOutlined />,
     label: '系统设置',
     children: [
-      { key: 'shop-auth',         icon: <ShopOutlined />, label: '店铺授权' },
-      { key: 'alibaba-settings',  icon: <ApiOutlined />,  label: '1688 配置' },
+      { key: 'shop-auth',        icon: <ShopOutlined />, label: '店铺授权',  code: 'MENU_SHOP_AUTH'    },
+      { key: 'alibaba-settings', icon: <ApiOutlined />,  label: '1688 配置', code: 'MENU_1688_CONFIG'   },
     ],
   },
 ];
+
+// ── 权限过滤：递归保留有权访问的菜单节点 ─────────────────────
+// permissions === null → 超管或老会话，返回全量
+// 父级分组：子节点过滤后若全部被移除，则父节点也隐藏
+function filterMenuItems(items: AppMenuItem[], permissions: string[] | null): AppMenuItem[] {
+  if (permissions === null) return items;
+  return items.reduce<AppMenuItem[]>((acc, item) => {
+    if (item.children) {
+      const visibleChildren = filterMenuItems(item.children, permissions);
+      if (visibleChildren.length > 0) acc.push({ ...item, children: visibleChildren });
+    } else {
+      // 无 code 的叶子节点（如仪表盘）始终可见
+      if (!item.code || permissions.includes(item.code)) acc.push(item);
+    }
+    return acc;
+  }, []);
+}
+
+// ── 将 AppMenuItem[] 转换为 Ant Design Menu 接受的 ItemType[] ─
+// 剥离 code 字段，避免 TypeScript 类型冲突
+type AntMenuItem = {
+  key: string;
+  icon?: React.ReactNode;
+  label: string;
+  children?: AntMenuItem[];
+};
+function toAntMenuItems(items: AppMenuItem[]): AntMenuItem[] {
+  return items.map(({ key, icon, label, children }) => ({
+    key,
+    icon,
+    label,
+    children: children ? toAntMenuItems(children) : undefined,
+  }));
+}
+
+// ── 从过滤后的菜单中收集所有叶子节点 key（用于访问权限校验） ──
+function collectLeafKeys(items: AppMenuItem[]): Set<string> {
+  const keys = new Set<string>();
+  for (const item of items) {
+    if (item.children) {
+      for (const k of collectLeafKeys(item.children)) keys.add(k);
+    } else {
+      keys.add(item.key);
+    }
+  }
+  return keys;
+}
 
 const menuLabelMap: Record<string, string> = {
   'dashboard':         '仪表盘',
@@ -136,7 +206,8 @@ const menuLabelMap: Record<string, string> = {
   'platform-orders':   '平台数据 / 平台订单',
   'sc-planning':       '供应采购 / 采购计划',
   'sc-management':     '供应采购 / 采购管理',
-  'users':             '用户管理',
+  'users':             '用户管理 / 分配账号',
+  'roles':             '用户管理 / 角色管理',
   'shop-auth':         '系统设置 / 店铺授权',
   'alibaba-settings':  '系统设置 / 1688 配置',
 };
@@ -203,21 +274,91 @@ function getRangeForPreset(preset: TimeRangePreset, customRange: [Dayjs, Dayjs] 
 // ── 主组件 ────────────────────────────────────────────────────
 const TAB_KEYS = ['platform-products', 'inventory-sku', 'platform-orders'] as const;
 
+// ── /me 接口响应类型 ───────────────────────────────────────────
+interface MeResponseData {
+  id:          number;
+  username:    string;
+  name:        string;
+  avatar:      string | null;
+  role:        { id: number; name: string; isAdmin?: boolean };
+  permissions: string[] | null; // null = 超管（不限制），[] = 无权限，[...] = 具体列表
+}
+
 export default function Dashboard() {
   const navigate  = useNavigate();
   const [searchParams] = useSearchParams();
-  const user      = getStoredUser();
   const [collapsed, setCollapsed] = useState(false);
   const [activeKey, setActiveKey] = useState('dashboard');
-  const [openKeys,  setOpenKeys]  = useState<string[]>(['product-dev', 'platform-data', 'supply-chain', 'sys-settings']);
+  const [openKeys,  setOpenKeys]  = useState<string[]>(['product-dev', 'platform-data', 'supply-chain', 'sys-settings', 'user-center']);
+
+  // ── 权限状态（React state，确保更新后触发重渲染） ─────────────
+  // 初始值从 localStorage 读取，避免首次渲染闪烁
+  const [permissions, setPermissions] = useState<string[] | null>(getStoredPermissions);
+  const [adminFlag,   setAdminFlag]   = useState<boolean>(isAdminUser);
+  // 刷新用户信息（供 Header 实时展示用）
+  const [currentUser, setCurrentUser] = useState<StoredUser | null>(getStoredUser);
+
+  // ── 应用初始化：调用 /me 接口获取最新权限 ─────────────────────
+  // 每次页面刷新都会执行，确保权限始终与后端同步，不依赖 localStorage 老数据。
+  useEffect(() => {
+    let cancelled = false;
+    request
+      .get<{ code: number; data: MeResponseData; message?: string }>('/auth/me')
+      .then(({ data: res }) => {
+        if (cancelled) return;
+        if (res.code === 200 && res.data) {
+          const { permissions: freshPerms, ...userFields } = res.data;
+          const freshUser: StoredUser = {
+            id:       userFields.id,
+            username: userFields.username,
+            name:     userFields.name,
+            avatar:   userFields.avatar,
+            role:     userFields.role,
+          };
+          // ① 更新 localStorage 缓存（供下次刷新初始快照使用）
+          writeAuthCache(freshUser, freshPerms);
+          // ② 更新 React state → 触发菜单重新过滤
+          const isAdmin = freshUser.role?.isAdmin === true || freshPerms === null;
+          setAdminFlag(isAdmin);
+          setPermissions(freshPerms);
+          setCurrentUser(freshUser);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // token 失效或网络异常 → 跳转登录页
+        navigate('/login');
+      });
+    return () => { cancelled = true; };
+  // 仅在组件挂载时执行一次
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 权限过滤：依赖 React state，permissions/adminFlag 变化后自动重算 ──
+  const filteredMenuConfig = useMemo(
+    () => filterMenuItems(ALL_MENU_ITEMS, adminFlag ? null : permissions),
+    [permissions, adminFlag],
+  );
+  const antMenuItems = useMemo(() => toAntMenuItems(filteredMenuConfig), [filteredMenuConfig]);
+  const allowedKeys  = useMemo(() => collectLeafKeys(filteredMenuConfig),  [filteredMenuConfig]);
+
+  // ── 安全跳转：若 key 无权访问，回落到仪表盘 ──────────────────
+  const gotoKey = useCallback((key: string) => {
+    if (key === 'dashboard' || allowedKeys.has(key)) {
+      setActiveKey(key);
+    } else {
+      message.warning('您没有访问该模块的权限');
+      setActiveKey('dashboard');
+    }
+  }, [allowedKeys]);
 
   // 支持 URL ?tab= 直接打开对应页面（如从订单详情新窗口跳转）
   useEffect(() => {
     const tab = searchParams.get('tab');
     if (tab && TAB_KEYS.includes(tab as (typeof TAB_KEYS)[number])) {
-      setActiveKey(tab);
+      gotoKey(tab);
     }
-  }, [searchParams]);
+  }, [searchParams, gotoKey]);
 
   // ── 时间筛选 ─────────────────────────────────────────────────
   const [timeRangePreset, setTimeRangePreset] = useState<TimeRangePreset>('7d');
@@ -307,8 +448,7 @@ export default function Dashboard() {
       setStats({ totalOrders: 0, gmv: 0, awaitingAcknowledge: 0 });
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        clearAuth();
         window.location.href = '/login';
       }
     } finally {
@@ -341,8 +481,7 @@ export default function Dashboard() {
       setTrendData([]);
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        clearAuth();
         window.location.href = '/login';
       }
     } finally {
@@ -402,8 +541,7 @@ export default function Dashboard() {
   }[timeRangePreset];
 
   const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearAuth(); // 同时清除 token / user / permissions
     navigate('/login');
   };
 
@@ -447,15 +585,15 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* 导航菜单 */}
+        {/* 导航菜单（已按当前用户权限动态过滤） */}
         <Menu
           theme="dark"
           mode="inline"
           selectedKeys={[activeKey]}
           openKeys={collapsed ? [] : openKeys}
           onOpenChange={(keys) => setOpenKeys(keys)}
-          onClick={({ key }) => setActiveKey(key)}
-          items={menuItems}
+          onClick={({ key }) => gotoKey(key)}
+          items={antMenuItems}
           style={{ background: '#0f172a', borderRight: 'none', marginTop: 8 }}
         />
       </Sider>
@@ -482,14 +620,14 @@ export default function Dashboard() {
                   size={32}
                   icon={<UserOutlined />}
                   style={{ background: '#2563EB' }}
-                  src={user?.avatar ?? undefined}
+                  src={currentUser?.avatar ?? undefined}
                 />
                 <div className="flex flex-col leading-none">
                   <span className="text-sm font-medium text-gray-800">
-                    {user?.name ?? user?.username ?? 'Admin'}
+                    {currentUser?.name ?? currentUser?.username ?? 'Admin'}
                   </span>
                   <span className="text-[11px] text-gray-400 mt-0.5">
-                    {user?.role?.name ?? '超级管理员'}
+                    {currentUser?.role?.name ?? '超级管理员'}
                   </span>
                 </div>
                 <DownOutlined style={{ fontSize: 10, color: '#94a3b8' }} />
@@ -739,8 +877,11 @@ export default function Dashboard() {
           {/* 供应采购 — 采购管理 */}
           {activeKey === 'sc-management' && <ProcurementManagement />}
 
-          {/* 用户管理 */}
+          {/* 用户管理 — 分配账号 */}
           {activeKey === 'users' && <UserManagement />}
+
+          {/* 用户管理 — 角色管理 */}
+          {activeKey === 'roles' && <RoleManagement />}
 
           {/* 店铺授权 */}
           {activeKey === 'shop-auth' && <ShopAuth />}
