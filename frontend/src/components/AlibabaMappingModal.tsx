@@ -323,6 +323,7 @@ export default function AlibabaMappingModal({
             }}>
               {result.imageUrl && (
                 <img src={result.imageUrl} width={48} height={48}
+                  referrerPolicy="no-referrer"
                   style={{ borderRadius: 8, objectFit: 'cover', border: '1px solid #e8e8e8' }}
                   onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                 />
@@ -367,6 +368,7 @@ export default function AlibabaMappingModal({
                       <Radio value={item.skuId} />
                       {item.imageUrl && (
                         <img src={item.imageUrl} width={36} height={36}
+                          referrerPolicy="no-referrer"
                           style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8' }}
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                         />

@@ -861,7 +861,7 @@ export default function Dashboard() {
           {activeKey === 'platform-orders' && <PlatformOrders />}
 
           {/* 我的私有产品库 */}
-          {activeKey === 'private-pool' && <PrivatePool />}
+          {activeKey === 'private-pool' && <PrivatePool onNavigate={(key) => setActiveKey(key)} />}
 
           {/* 库存 SKU */}
           {activeKey === 'inventory-sku' && (

@@ -437,7 +437,11 @@ function PublishModal({ product, onClose, onSuccess }: PublishModalProps) {
 
 // ─── 主组件 ───────────────────────────────────────────────────
 
-export default function PrivatePool() {
+interface PrivatePoolProps {
+  onNavigate?: (key: string) => void;
+}
+
+export default function PrivatePool({ onNavigate }: PrivatePoolProps) {
   const [products, setProducts] = useState<PrivateProduct[]>([]);
   const [loading,  setLoading]  = useState(false);
   const [page,     setPage]     = useState(1);
@@ -594,26 +598,63 @@ export default function PrivatePool() {
       },
     },
     {
-      title: '操作', key: 'action', width: 200, fixed: 'right',
+      title: '操作', key: 'action', width: 240, fixed: 'right',
       render: (_: unknown, record: PrivateProduct) => {
         const constructed = !!(record.sku && record.sku.trim());
+        const isMAN = constructed && record.sku!.toUpperCase().startsWith('MAN-');
         return (
-          <Space size={6}>
-            <Button size="small" icon={<BarcodeOutlined />} style={{ borderRadius: 6 }} onClick={() => setRecalcTarget(record)}>🗃️ 建库</Button>
+          <Space size={6} wrap>
+            {/* 建库按钮：未建库时可点击，已建库后置灰提示 */}
+            {constructed ? (
+              <Tooltip title={`SKU：${record.sku}`}>
+                <Button
+                  size="small"
+                  icon={<CheckCircleOutlined />}
+                  disabled
+                  style={{ borderRadius: 6, color: '#52c41a', borderColor: '#b7eb8f', background: '#f6ffed', cursor: 'default' }}
+                >
+                  已建库
+                </Button>
+              </Tooltip>
+            ) : (
+              <Button size="small" icon={<BarcodeOutlined />} style={{ borderRadius: 6 }} onClick={() => setRecalcTarget(record)}>
+                🗃️ 建库
+              </Button>
+            )}
+
+            {/* 采购区：已采购 / 首批采购 / 置灰 */}
             {record.publishStatus === 'PUBLISHED' ? (
               <Button size="small" disabled icon={<CheckCircleOutlined />} style={{ borderRadius: 6 }}>已采购</Button>
-            ) : constructed ? (
-              <Button size="small" type="primary" icon={<RocketOutlined />} style={{ borderRadius: 6 }} onClick={() => setPublishTarget(record)}>🚀 首批采购</Button>
+            ) : constructed && !isMAN ? (
+              <Button size="small" type="primary" icon={<RocketOutlined />} style={{ borderRadius: 6 }} onClick={() => setPublishTarget(record)}>
+                🚀 首批采购
+              </Button>
             ) : (
-              <Tooltip title="将产品加入采购计划，开启首批补货（请先完成「建库」生成 SKU）">
-                <Button size="small" type="primary" disabled icon={<RocketOutlined />} style={{ borderRadius: 6 }}>🚀 首批采购</Button>
+              <Tooltip title={isMAN ? 'MAN- 前缀产品无需采购计划' : '请先完成「建库」生成 SKU'}>
+                <Button size="small" type="primary" disabled icon={<RocketOutlined />} style={{ borderRadius: 6 }}>
+                  🚀 首批采购
+                </Button>
+              </Tooltip>
+            )}
+
+            {/* 去采购计划：已建库且非 MAN- 前缀时显示 */}
+            {constructed && !isMAN && onNavigate && (
+              <Tooltip title="跳转至采购计划页面">
+                <Button
+                  size="small"
+                  icon={<ShoppingOutlined />}
+                  style={{ borderRadius: 6 }}
+                  onClick={() => onNavigate('sc-planning')}
+                >
+                  去采购
+                </Button>
               </Tooltip>
             )}
           </Space>
         );
       },
     },
-  ], []);
+  ], [onNavigate]);
 
   return (
     <div className="min-h-full">

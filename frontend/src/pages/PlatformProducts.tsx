@@ -22,6 +22,8 @@ interface StoreProduct {
   name?: string | null;
   product_name?: string | null;
   productName?: string | null;
+  image?: string | null;        // 后端合并后的最终兜底图（优先平台图，无则取本地图）
+  local_image?: string | null;  // 纯本地库存备用图
   main_image?: string | null;
   mainImage?: string | null;
   imageUrl?: string | null;
@@ -53,6 +55,12 @@ interface StoreProduct {
   status?: string;
   rejection_reason?: string | null;
   rejectionReason?: string | null;
+  // 后端直接返回的映射关系字段（比 inventoryMap 本地字典更权威）
+  mapped_inventory_sku?: string | null;
+  inventorySku?: string | null;
+  inventory_sku?: string | null;
+  inventoryId?: number | null;
+  inventory_id?: number | null;
 }
 
 // 本地库存 SKU 信息（用于关联与毛利计算）
@@ -84,6 +92,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   const [currency, setCurrency] = useState<string>('');
   const [searchKeyword, setSearchKeyword] = useState(initialSearch ?? '');
   const [appliedKeyword, setAppliedKeyword] = useState(initialSearch ?? ''); // 实际已应用的搜索关键词
+  // 关联状态筛选：'all' | 'mapped' | 'unmapped'
+  const [mappingStatus, setMappingStatus] = useState<'all' | 'mapped' | 'unmapped'>('all');
 
   // 手动映射弹窗
   const [mapModalOpen, setMapModalOpen] = useState(false);
@@ -157,7 +167,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     }
   }, []);
 
-  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean; page?: number; pageSize?: number; sortBy?: string | null; sortOrder?: 'ascend' | 'descend' | null }) => {
+  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean; page?: number; pageSize?: number; sortBy?: string | null; sortOrder?: 'ascend' | 'descend' | null; mappingStatus?: 'all' | 'mapped' | 'unmapped' }) => {
     if (sid == null) {
       setProducts([]);
       setTotalCount(0);
@@ -178,7 +188,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       if (searchVal) params.search = searchVal;
       if (opts?.sortBy) params.sortBy = opts.sortBy;
       if (opts?.sortOrder) params.sortOrder = opts.sortOrder;
-      console.log('=== FRONTEND SORT REQUEST ===', { sortBy: opts?.sortBy, sortOrder: opts?.sortOrder, params });
+      if (opts?.mappingStatus && opts.mappingStatus !== 'all') params.mappingStatus = opts.mappingStatus;
       if (opts?.refreshSales) {
         params.refreshSales = 1;
         params._t = Date.now();
@@ -275,7 +285,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       if (res.code === 200) {
         setPendingUpdateCount(0);
         setPage(1);
-        await fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
+        await fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
         message.success('同步成功');
       } else {
         message.error(res.message ?? '网络异常');
@@ -328,7 +338,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       if (shopId) {
         setPendingUpdateCount(0);
         setPage(1);
-        fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
+        fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus });
       }
     }
   }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
@@ -356,7 +366,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         message.success('图片已保存');
         closePasteModal();
         setPage(1);
-        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
+        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
       } else {
         message.error(res.message ?? '保存失败');
       }
@@ -378,18 +388,29 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         inventorySkuId: mapSelected.id,
         inventorySku: mapSelected.sku ?? undefined,
       });
-      if (res.code === 200) {
-        message.success('绑定成功');
-        closeMapModal();
-        fetchInventory();
-        setPage(1);
-        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
-      } else {
-        message.error(res.message ?? '绑定失败');
+
+      // ── 严格校验业务状态码 ──────────────────────────────────────
+      // 只有后端明确返回 code === 200 才视为成功。
+      // 任何其他值（400 / 404 / 500 等）直接 early-return，弹窗保持打开，
+      // 绝不执行 closeMapModal() 或刷新列表，防止"假绑定"现象。
+      if (res.code !== 200) {
+        message.error(res.message ?? '绑定失败，请稍后重试');
+        return;
       }
+
+      // ── 明确成功后才执行后续操作 ───────────────────────────────
+      message.success(res.message ?? '绑定成功');
+      closeMapModal();
+      fetchInventory();
+      setPage(1);
+      fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message;
-      message.error(msg ?? '绑定失败');
+      // ── HTTP 层面 4xx/5xx 错误（Axios 抛出）────────────────────
+      // 优先读后端 response body 的 message，兜底显示通用提示。
+      // 此处绝对不调用 closeMapModal()，弹窗保持打开让用户重试。
+      const axiosBody = (err as { response?: { data?: { message?: string } } })?.response?.data;
+      const errMsg = axiosBody?.message ?? '绑定失败，请稍后重试';
+      message.error(errMsg);
     } finally {
       setMapSubmitting(false);
     }
@@ -458,7 +479,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     if (shopId == null) return;
     setPendingUpdateCount(0);
     setPage(1);
-    fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder });
+    fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
   }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
 
   const handleTableChange = useCallback((pagination: { current?: number; pageSize?: number }, _filters: unknown, sorter: unknown, extra?: { action?: 'paginate' | 'sort' | 'filter' }) => {
@@ -466,10 +487,14 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     const newSize = pagination.pageSize ?? pageSize;
     const sizeChanged = newSize !== pageSize;
     const sorterObj = Array.isArray(sorter) ? (sorter as { field?: string | string[]; order?: string; columnKey?: string }[])[0] : (sorter as { field?: string | string[]; order?: string; columnKey?: string });
-    const rawField = sorterObj?.field;
-    const newSortBy = (rawField != null ? (Array.isArray(rawField) ? String(rawField[0]) : String(rawField)) : (sorterObj?.columnKey != null ? String(sorterObj.columnKey) : null)) ?? null;
+    // columnKey（列定义的 key 属性）优先于 dataIndex（field），确保 key:'stock' 能正确传给后端
+    const rawField  = sorterObj?.field;
+    const newSortBy = sorterObj?.columnKey != null
+      ? String(sorterObj.columnKey)
+      : rawField != null
+        ? (Array.isArray(rawField) ? String(rawField[0]) : String(rawField))
+        : null;
     const newSortOrder = (sorterObj?.order ?? null) as 'ascend' | 'descend' | null;
-    console.log('=== FRONTEND SORT REQUEST ===', { sorterRaw: sorter, sorterObj, newSortBy, newSortOrder, extra });
     setPage(sizeChanged ? 1 : newPage);
     setPageSize(newSize);
     setSortBy(newSortOrder ? newSortBy : null);
@@ -482,9 +507,10 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         pageSize: newSize,
         sortBy: sortByParam,
         sortOrder: sortOrderParam,
+        mappingStatus,
       });
     }
-  }, [shopId, appliedKeyword, pageSize, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, mappingStatus, fetchProducts]);
 
   const columns: ColumnsType<StoreProduct> = useMemo(() => [
     {
@@ -494,8 +520,12 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       width: 90,
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
-        const url = r.main_image;
-        return <ProductImage url={url && typeof url === 'string' ? url.trim() : null} />;
+        // 主图：后端已合并字段（平台图优先），依次回退兼容各字段命名
+        const raw = r.image ?? r.main_image ?? r.mainImage ?? r.imageUrl ?? r.image_url ?? null;
+        const url = raw && typeof raw === 'string' ? raw.trim() : null;
+        // 本地备用图：传给 ProductImage，平台图 404/403 时自动降级使用
+        const localUrl = r.local_image && typeof r.local_image === 'string' ? r.local_image.trim() : null;
+        return <ProductImage url={url} localUrl={localUrl} />;
       },
     },
     {
@@ -555,8 +585,10 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
         const sku = String(r.sku ?? '').trim();
-        const skuKey = sku.toUpperCase();
-        const isLinked = skuKey && inventoryMap[skuKey];
+        // 仅以后端明确返回的关联字段为准，去掉本地字典兜底，
+        // 避免 SKU 名称相同但未实际绑定的行误亮"已关联"标签。
+        const isMapped = !!(r.mapped_inventory_sku || r.inventorySku || r.inventory_sku);
+        const isLinked = isMapped;
         const pnk = String(r.pnk ?? r.part_number_key ?? r.partNumber ?? '').trim();
         const codeStyle = { fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', fontSize: 14, fontWeight: 400 };
         return (
@@ -684,9 +716,11 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     {
       title: '平台库存',
       dataIndex: 'platformStock',
-      key: 'platformStock',
+      key: 'stock',          // 与后端 sortBy=stock 参数对齐
       width: 100,
       align: 'center',
+      sorter: true,
+      sortOrder: sortBy === 'stock' ? sortOrder : undefined,
       render: (_: unknown, r: StoreProduct) => {
         const v = r.platformStock ?? r.platform_stock ?? r.stock;
         return <span>{v != null ? v : '-'}</span>;
@@ -722,13 +756,27 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               style={{ minWidth: 200 }}
             />
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder }); }} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus }); }} loading={loading}>
             刷新
           </Button>
         </Space>
       </div>
 
       <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <Select
+          value={mappingStatus}
+          onChange={(val: 'all' | 'mapped' | 'unmapped') => {
+            setMappingStatus(val);
+            setPage(1);
+            fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus: val });
+          }}
+          style={{ width: 130 }}
+          options={[
+            { value: 'all',      label: '全部状态' },
+            { value: 'mapped',   label: '✅ 已关联' },
+            { value: 'unmapped', label: '⭕ 未关联' },
+          ]}
+        />
         <Input
           placeholder="输入 SKU / EAN / PNK 码搜索..."
           prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
@@ -741,7 +789,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
             }
             setAppliedKeyword(searchKeyword);
             setPage(1);
-            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder });
+            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
           }}
           allowClear
           style={{ width: 280 }}
@@ -756,7 +804,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
             }
             setAppliedKeyword(searchKeyword);
             setPage(1);
-            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder });
+            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
           }}
           loading={loading}
         >
@@ -767,7 +815,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
             setSearchKeyword('');
             setAppliedKeyword('');
             setPage(1);
-            fetchProducts(shopId, '', { page: 1, pageSize, sortBy, sortOrder });
+            fetchProducts(shopId, '', { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
           }}
           loading={loading}
         >
@@ -943,7 +991,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
                       }}
                     >
                       {url ? (
-                        <img src={url} alt="" style={{ width: 48, height: 48, objectFit: 'contain' }} />
+                        <img src={url} alt="" referrerPolicy="no-referrer" style={{ width: 48, height: 48, objectFit: 'contain' }} />
                       ) : (
                         <Typography.Text type="secondary" style={{ fontSize: 10 }}>无图</Typography.Text>
                       )}

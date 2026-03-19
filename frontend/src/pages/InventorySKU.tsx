@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Input, Button, Empty, Image, Tooltip, message,
-  Dropdown, Modal, Space, InputNumber, Divider, Upload,
+  Dropdown, Modal, Space, InputNumber, Divider, Upload, Popconfirm,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import type { MenuProps } from 'antd';
@@ -9,7 +9,7 @@ import {
   SearchOutlined, ShoppingOutlined, ReloadOutlined, DatabaseOutlined, LinkOutlined,
   ToolOutlined, FileTextOutlined, ThunderboltOutlined, HomeOutlined, EditOutlined,
   DownOutlined, PlusOutlined, AppstoreAddOutlined, ExportOutlined, GlobalOutlined,
-  UploadOutlined,
+  UploadOutlined, DeleteOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
 import AlibabaMappingModal from '../components/AlibabaMappingModal';
@@ -66,6 +66,7 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
   const [editTarget,       setEditTarget]       = useState<InventoryProduct | null>(null);
   const [exporting,        setExporting]        = useState(false);
   const [mappingTarget,    setMappingTarget]    = useState<InventoryProduct | null>(null);
+  const [deleting,         setDeleting]         = useState<number | null>(null);
 
   const fetchProducts = useCallback(async (p: number, ps: number, kw: string) => {
     setLoading(true);
@@ -108,6 +109,26 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
     setPage(1);
     fetchProducts(1, pageSize, value);
   }, [fetchProducts, pageSize]);
+
+  // ── 删除单个 SKU ─────────────────────────────────────────────
+  const handleDelete = useCallback(async (record: InventoryProduct) => {
+    setDeleting(record.id);
+    try {
+      const { data: res } = await request.delete<{ code: number; message: string }>(
+        `/products/inventory/${record.id}`,
+      );
+      if (res.code === 200) {
+        message.success(res.message || '删除成功');
+        refresh();
+      } else {
+        message.error(res.message || '删除失败');
+      }
+    } catch {
+      message.error('删除失败，请检查网络或后端服务');
+    } finally {
+      setDeleting(null);
+    }
+  }, [refresh]);
 
   const hasSelected = selectedRowKeys.length > 0;
 
@@ -275,11 +296,43 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
       ),
     },
     {
-      title: '操作', key: 'action', width: 90, align: 'center', fixed: 'right',
+      title: '操作', key: 'action', width: 140, align: 'center', fixed: 'right',
       render: (_: unknown, record: InventoryProduct) => (
-        <Button type="link" size="small" icon={<EditOutlined />} onClick={() => { setEditTarget(record); setEditModalOpen(true); }}>
-          编辑
-        </Button>
+        <Space size={4}>
+          <Button
+            type="link"
+            size="small"
+            icon={<EditOutlined />}
+            onClick={() => { setEditTarget(record); setEditModalOpen(true); }}
+            style={{ padding: '0 4px' }}
+          >
+            编辑
+          </Button>
+          <Popconfirm
+            title="确认删除该 SKU 吗？"
+            description={
+              <span>
+                SKU：<b>{record.sku ?? '—'}</b> 将被永久删除，此操作不可恢复。
+              </span>
+            }
+            onConfirm={() => handleDelete(record)}
+            okText="确认删除"
+            okType="danger"
+            cancelText="取消"
+            placement="topRight"
+          >
+            <Button
+              type="link"
+              size="small"
+              danger
+              icon={<DeleteOutlined />}
+              loading={deleting === record.id}
+              style={{ padding: '0 4px' }}
+            >
+              删除
+            </Button>
+          </Popconfirm>
+        </Space>
       ),
     },
     {
@@ -313,7 +366,7 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
         return <Tag color="green" bordered={false} style={{ borderRadius: 6, fontWeight: 600 }}>已建库</Tag>;
       },
     },
-  ], []);
+  ], [deleting, handleDelete]);
 
   return (
     <div className="min-h-full">
@@ -552,7 +605,7 @@ function RepeatPurchaseModal({ open, rows, onCancel, onSuccess }: RepeatPurchase
                   <td style={{ ...rptdStyle, background: '#f9fafb', borderRight: '1px solid #f0f0f0' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       {row.imageUrl
-                        ? <img src={row.imageUrl} width={36} height={36} style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
+                        ? <img src={row.imageUrl} width={36} height={36} referrerPolicy="no-referrer" style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
                         : <div style={{ width: 36, height: 36, borderRadius: 6, background: '#f0f0f0', flexShrink: 0 }} />}
                       <span style={{ fontFamily: "'Inter', monospace", fontSize: 12, fontWeight: 500, letterSpacing: 0.3, color: '#1e293b' }}>
                         {row.sku || '—'}
@@ -698,7 +751,7 @@ function StockAdjustModal({ open, rows, onCancel, onDone }: StockAdjustModalProp
                   <td style={{ ...stdStyle, background: '#f9fafb', borderRight: '1px solid #f0f0f0' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       {row.imageUrl
-                        ? <img src={row.imageUrl} width={36} height={36} style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
+                        ? <img src={row.imageUrl} width={36} height={36} referrerPolicy="no-referrer" style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
                         : <div style={{ width: 36, height: 36, borderRadius: 6, background: '#f0f0f0', flexShrink: 0 }} />}
                       <span style={{ fontFamily: "'Inter', monospace", fontSize: 12, fontWeight: 500, letterSpacing: 0.3, color: '#1e293b' }}>
                         {row.sku || '—'}
@@ -873,8 +926,8 @@ function BatchEditModal({ open, rows, onCancel, onDone }: BatchEditModalProps) {
                 <td style={{ ...btdStyle, background: '#f9fafb', borderRight: '1px solid #f0f0f0' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     {row.imageUrl
-                      ? <img src={row.imageUrl} width={36} height={36} style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
-                      : <div style={{ width: 36, height: 36, borderRadius: 6, background: '#f0f0f0', flexShrink: 0 }} />}
+                        ? <img src={row.imageUrl} width={36} height={36} referrerPolicy="no-referrer" style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
+                        : <div style={{ width: 36, height: 36, borderRadius: 6, background: '#f0f0f0', flexShrink: 0 }} />}
                     <span style={{ fontFamily: "'Inter', monospace", fontSize: 12, fontWeight: 500, letterSpacing: 0.3, color: '#1e293b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {row.sku || '—'}
                     </span>

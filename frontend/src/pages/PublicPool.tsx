@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Button, Rate, Space, Tooltip, Cascader, Switch,
   message, Empty, Image, Typography, Input, Select,
-  Modal, InputNumber, Divider,
+  Modal, InputNumber, Divider, Spin,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 
@@ -12,6 +12,7 @@ import {
   FilterOutlined, AppstoreOutlined, CalculatorOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
+import { isAdminUser, getStoredPermissions } from '../lib/auth';
 
 // ─── 罗马尼亚语 → 中文 翻译字典（覆盖四级类目常见名称）──────
 
@@ -293,13 +294,7 @@ const PRICE_RANGE_OPTIONS = [
   { value: 'over150',  label: '> 150 RON' },
 ];
 
-function getPermissions(): string[] {
-  try {
-    const raw = localStorage.getItem('user');
-    if (!raw) return [];
-    return (JSON.parse(raw) as { permissions?: string[] }).permissions ?? [];
-  } catch { return []; }
-}
+// 已由 auth.ts 统一管理，此处不再自行读取 user.permissions（旧字段已废弃）
 
 // ─── 利润测算弹窗 ─────────────────────────────────────────────
 
@@ -344,6 +339,10 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
   const [rate,        setRate]        = useState<number | null>(DEFAULT_EXCHANGE_RATE);
   const [purchaseUrl, setPurchaseUrl] = useState('');
 
+  // ── 翻译状态 ──────────────────────────────────────────────
+  const [translatedTitle,   setTranslatedTitle]   = useState<string | null>(null);
+  const [translating,       setTranslating]       = useState(false);
+
   const open = product !== null;
 
   useEffect(() => {
@@ -353,6 +352,27 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
       setWeight(null); setCost(null); setFbe(null);
       setRate(DEFAULT_EXCHANGE_RATE);
       setPurchaseUrl('');
+      setTranslatedTitle(null);
+
+      // 自动翻译标题
+      if (product.title) {
+        setTranslating(true);
+        request.post<{ code: number; data: { translatedText: string }; message?: string }>(
+          '/translate',
+          { text: product.title, from: 'ro', to: 'zh' },
+        ).then(({ data: res }) => {
+          if (res.code === 200 && res.data?.translatedText) {
+            setTranslatedTitle(res.data.translatedText);
+            // 翻译结果仅供界面参考，不自动填充"中文名"输入框
+          } else {
+            setTranslatedTitle('（翻译失败）');
+          }
+        }).catch(() => {
+          setTranslatedTitle('（翻译失败，请手动填写）');
+        }).finally(() => {
+          setTranslating(false);
+        });
+      }
     }
   }, [product]);
 
@@ -431,6 +451,49 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
         </Button>,
       ]}
     >
+      {/* ── 双语标题 ── */}
+      <div style={{
+        background: 'linear-gradient(135deg, #e6f4ff 0%, #f0f5ff 100%)',
+        borderRadius: 10, padding: '14px 18px', marginBottom: 16,
+        border: '1px solid #bae0ff',
+      }}>
+        {/* 原文（罗马尼亚语） */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
+          <span style={{
+            flexShrink: 0, fontSize: 11, color: '#1890ff', fontWeight: 600,
+            background: '#e6f4ff', border: '1px solid #91caff',
+            borderRadius: 4, padding: '1px 6px', lineHeight: '20px',
+          }}>RO</span>
+          <span style={{
+            fontSize: 13, color: '#262626', lineHeight: 1.5, wordBreak: 'break-word',
+          }}>
+            {product?.title ?? '—'}
+          </span>
+        </div>
+
+        {/* 中文翻译 */}
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <span style={{
+            flexShrink: 0, fontSize: 11, color: '#52c41a', fontWeight: 600,
+            background: '#f6ffed', border: '1px solid #b7eb8f',
+            borderRadius: 4, padding: '1px 6px', lineHeight: '20px',
+          }}>中</span>
+          {translating ? (
+            <span style={{ fontSize: 13, color: '#8c8c8c', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Spin size="small" />
+              正在翻译中…
+            </span>
+          ) : (
+            <span style={{
+              fontSize: 13, color: translatedTitle?.startsWith('（') ? '#ff4d4f' : '#262626',
+              lineHeight: 1.5, wordBreak: 'break-word', fontWeight: translatedTitle && !translatedTitle.startsWith('（') ? 500 : 400,
+            }}>
+              {translatedTitle ?? '—'}
+            </span>
+          )}
+        </div>
+      </div>
+
       {/* ── 产品信息 ── */}
       <div style={{
         background: '#f6f8fa', borderRadius: 10, padding: '14px 20px',
@@ -587,8 +650,8 @@ export default function PublicPool() {
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
-  const permissions = getPermissions();
-  const canSelect   = permissions.includes('BTN_SELECT_PRODUCT');
+  // 超级管理员直接放行；普通用户需拥有 BTN_SELECT_PRODUCT 权限码
+  const canSelect = isAdminUser() || (getStoredPermissions() ?? []).includes('BTN_SELECT_PRODUCT');
 
   // ── 加载品牌 ─────────────────────────────────────────────
 
