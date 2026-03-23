@@ -1,11 +1,14 @@
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert, Dropdown,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
-import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined } from '@ant-design/icons';
+import type { MenuProps } from 'antd';
 import request from '../lib/request';
 import ProductImage from '../components/ProductImage';
+import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
+import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
 
 const { Text } = Typography;
 
@@ -61,12 +64,21 @@ interface StoreProduct {
   inventory_sku?: string | null;
   inventoryId?: number | null;
   inventory_id?: number | null;
+  // 后端直接内联返回的本地库存详情（用于采购计划，无需再查字典）
+  local_product_id?: number | null;
+  localProductId?: number | null;
+  local_chinese_name?: string | null;
+  localChineseName?: string | null;
+  purchase_cost?: number | null;
+  purchaseCost?: number | null;
 }
 
-// 本地库存 SKU 信息（用于关联与毛利计算）
+// 本地库存 SKU 信息（用于关联、毛利计算及采购计划）
 interface LocalInventoryMap {
-  imageUrl: string | null;
+  id:           number;            // 库存产品 DB 主键，创建采购计划时必须使用此 ID
+  imageUrl:     string | null;
   purchasePrice: number | null;
+  chineseName:  string | null;
 }
 
 // 库存 SKU 列表项（用于映射弹窗搜索）
@@ -122,12 +134,18 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   // 服务端排序状态
   const [sortBy, setSortBy] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'ascend' | 'descend' | null>(null);
+
+  // 多选与采购计划
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [selectedRows,    setSelectedRows]    = useState<StoreProduct[]>([]);
+  const [planModalOpen,   setPlanModalOpen]   = useState(false);
+  const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
   const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
 
   const fetchInventory = useCallback(async () => {
     try {
-      const { data: res } = await request.get<{ code: number; data?: { list?: { sku?: string; imageUrl?: string; purchasePrice?: number }[] } }>(
+      const { data: res } = await request.get<{ code: number; data?: { list?: { id?: number; sku?: string; imageUrl?: string; purchasePrice?: number; chineseName?: string }[] } }>(
         '/products/inventory',
         { params: { page: 1, pageSize: 2000 } },
       );
@@ -135,10 +153,12 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         const map: Record<string, LocalInventoryMap> = {};
         res.data.list.forEach((p) => {
           const sku = String(p.sku ?? '').trim().toUpperCase();
-          if (sku) {
+          if (sku && p.id != null) {
             map[sku] = {
-              imageUrl: p.imageUrl ?? null,
+              id:            p.id,
+              imageUrl:      p.imageUrl ?? null,
               purchasePrice: p.purchasePrice ?? null,
+              chineseName:   p.chineseName ?? null,
             };
           }
         });
@@ -482,6 +502,37 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
   }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
 
+  // ── 批量创建采购计划 ───────────────────────────────────────────
+  const handleCreatePlan = useCallback(() => {
+    // 拦截：直接检查行内后端返回的本地库存 ID，不依赖本地字典
+    const unlinked = selectedRows.filter(
+      (r) => !(r.local_product_id ?? r.localProductId),
+    );
+    if (unlinked.length > 0) {
+      message.warning(`有 ${unlinked.length} 个产品未关联本地库存 SKU，无法创建采购计划。请先在"操作"列完成绑定。`);
+      return;
+    }
+    setPlanModalOpen(true);
+  }, [selectedRows]);
+
+  // 将选中的平台产品转换为 RepeatPurchaseRow，直接从行数据取后端内联字段
+  const planRows = useMemo<RepeatPurchaseRow[]>(() => {
+    return selectedRows.map((r) => {
+      const localId  = r.local_product_id ?? r.localProductId ?? 0;
+      const linkedSku = String(r.mapped_inventory_sku ?? r.inventorySku ?? r.inventory_sku ?? '').trim() || null;
+      // 图片：优先取本地库存图，兜底取平台图
+      const imageUrl  = r.local_image ?? r.image ?? r.main_image ?? null;
+      return {
+        id:               localId,
+        imageUrl,
+        sku:              linkedSku,
+        chineseName:      r.local_chinese_name ?? r.localChineseName ?? null,
+        purchasePrice:    r.purchase_cost ?? r.purchaseCost ?? null,
+        purchaseQuantity: 1,
+      };
+    });
+  }, [selectedRows]);
+
   const handleTableChange = useCallback((pagination: { current?: number; pageSize?: number }, _filters: unknown, sorter: unknown, extra?: { action?: 'paginate' | 'sort' | 'filter' }) => {
     const newPage = pagination.current ?? 1;
     const newSize = pagination.pageSize ?? pageSize;
@@ -756,10 +807,57 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
               style={{ minWidth: 200 }}
             />
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus }); }} loading={loading}>
+            <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus }); }} loading={loading}>
             刷新
           </Button>
         </Space>
+      </div>
+
+      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {/* 批量处理 Dropdown */}
+        <Dropdown
+          trigger={['click']}
+          menu={{
+            items: [
+              {
+                key: 'plan',
+                icon: <FileTextOutlined />,
+                label: '📝 创建采购计划',
+                onClick: handleCreatePlan,
+              },
+            ] satisfies MenuProps['items'],
+          }}
+        >
+          <Button icon={<ToolOutlined />} disabled={!hasSelected}>
+            🛠️ 批量处理{hasSelected ? ` (${selectedRowKeys.length})` : ''} <DownOutlined />
+          </Button>
+        </Dropdown>
+
+        {/* 店铺操作 Dropdown */}
+        <Dropdown
+          trigger={['click']}
+          disabled={!shopId}
+          menu={{
+            items: [
+              {
+                key: 'syncUrls',
+                icon: <LinkOutlined />,
+                label: '🔗 同步链接',
+                onClick: handleSyncUrls,
+              },
+              {
+                key: 'pullProducts',
+                icon: <DownloadOutlined />,
+                label: '⬇️ 拉取平台产品',
+                onClick: handleSyncProducts,
+              },
+            ] satisfies MenuProps['items'],
+          }}
+        >
+          <Button icon={<SettingOutlined />} loading={syncUrlsLoading || syncProductsLoading} disabled={!shopId}>
+            ⚙️ 店铺操作 <DownOutlined />
+          </Button>
+        </Dropdown>
       </div>
 
       <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -821,23 +919,6 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         >
           重置
         </Button>
-        <Button
-          icon={<LinkOutlined />}
-          onClick={handleSyncUrls}
-          loading={syncUrlsLoading}
-          disabled={!shopId}
-        >
-          同步链接
-        </Button>
-        <Button
-          type="primary"
-          icon={<DownloadOutlined />}
-          onClick={handleSyncProducts}
-          loading={syncProductsLoading}
-          disabled={!shopId}
-        >
-          ⬇️ 拉取平台产品
-        </Button>
       </div>
 
       {pendingUpdateCount > 0 && (
@@ -860,6 +941,11 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           rowKey="id"
           loading={loading}
           onChange={handleTableChange}
+          rowSelection={{
+            selectedRowKeys,
+            onChange: (keys, rows) => { setSelectedRowKeys(keys); setSelectedRows(rows); },
+            preserveSelectedRowKeys: true,
+          }}
           pagination={{
             current: page,
             pageSize,
@@ -870,6 +956,14 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           locale={{ emptyText: <Empty description={shopId ? '暂无平台产品' : '请先选择店铺'} style={{ padding: 48 }} /> }}
         />
       </div>
+
+      {/* 批量创建采购计划弹窗 */}
+      <RepeatPurchaseModal
+        open={planModalOpen}
+        rows={planRows}
+        onCancel={() => setPlanModalOpen(false)}
+        onSuccess={() => { setPlanModalOpen(false); setSelectedRowKeys([]); setSelectedRows([]); }}
+      />
 
       {/* 手动贴图地址弹窗 */}
       <Modal

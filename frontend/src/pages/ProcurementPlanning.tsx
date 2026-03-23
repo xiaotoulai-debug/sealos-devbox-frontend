@@ -1,13 +1,15 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Button, Tooltip, message, Empty, Image, Typography, Space, Modal,
-  InputNumber, Input, Divider, Select, Spin,
+  InputNumber, Input, Divider, Select, Spin, Dropdown,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
+import type { MenuProps } from 'antd';
 import {
   SearchOutlined, ShoppingOutlined, ReloadOutlined, LinkOutlined,
-  FileTextOutlined, PlusOutlined, ToolOutlined, FileDoneOutlined,
+  FileTextOutlined, FileDoneOutlined, ToolOutlined, DownOutlined,
   ExclamationCircleFilled, RollbackOutlined, EnvironmentOutlined,
+  DownloadOutlined, DeleteOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
 import AlibabaMappingModal from '../components/AlibabaMappingModal';
@@ -49,7 +51,7 @@ export default function ProcurementPlanning() {
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [selectedRows,    setSelectedRows]    = useState<PurchasingProduct[]>([]);
   const [orderModalOpen,  setOrderModalOpen]  = useState(false);
-  const [batchModalOpen,  setBatchModalOpen]  = useState(false);
+  const [removing,        setRemoving]        = useState(false);
   const [mappingTarget,   setMappingTarget]   = useState<PurchasingProduct | null>(null);
 
   const fetchProducts = useCallback(async (p: number, ps: number) => {
@@ -77,6 +79,105 @@ export default function ProcurementPlanning() {
     setPageSize(ns);
     fetchProducts(np, ns);
   }, [fetchProducts, pageSize]);
+
+  // ── 批量移除（退回意向池）─────────────────────────────────────
+  const handleBatchRemove = useCallback(() => {
+    if (selectedRowKeys.length === 0) return;
+    const ids = selectedRows.map((r) => r.id);
+    Modal.confirm({
+      title: '批量移出采购计划',
+      icon: <ExclamationCircleFilled style={{ color: '#ff4d4f' }} />,
+      content: `确定要将这 ${ids.length} 个产品彻底移出采购计划吗？`,
+      okText: '彻底移出',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        setRemoving(true);
+        try {
+          const { data: res } = await request.put<{ code: number; message: string; data: { count: number } }>(
+            '/products/batch-discard', { ids },
+          );
+          if (res.code === 200) {
+            message.success(res.message || '操作成功');
+            setSelectedRowKeys([]);
+            setSelectedRows([]);
+            fetchProducts(page, pageSize);
+          } else {
+            message.error(res.message || '操作失败');
+          }
+        } catch {
+          message.error('移出失败，请检查网络');
+        } finally {
+          setRemoving(false);
+        }
+      },
+    });
+  }, [selectedRowKeys, selectedRows, page, pageSize, fetchProducts]);
+
+  // ── 批量下载 CSV（纯前端）────────────────────────────────────
+  const handleBatchDownload = useCallback(() => {
+    if (selectedRows.length === 0) return;
+
+    const headers = ['SKU', '中文名', '采购价(¥)', '采购数量', '采购总金额(¥)', '采购链接', '1688订单号'];
+    const rows = selectedRows.map((r) => {
+      const qty    = r.purchaseQuantity ?? 0;
+      const price  = r.purchasePrice   ?? 0;
+      const total  = (price * qty).toFixed(2);
+      // 字段含逗号/引号时用双引号包裹
+      const cell = (v: string | number | null | undefined) => {
+        const s = String(v ?? '');
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? `"${s.replace(/"/g, '""')}"`
+          : s;
+      };
+      return [
+        cell(r.sku),
+        cell(r.chineseName),
+        cell(price.toFixed(2)),
+        cell(qty),
+        cell(total),
+        cell(r.purchaseUrl),
+        cell(r.externalOrderId),
+      ].join(',');
+    });
+
+    const bom = '\uFEFF'; // UTF-8 BOM，确保 Excel 正确显示中文
+    const csv = bom + [headers.join(','), ...rows].join('\r\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const now  = new Date();
+    const ts   = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `采购计划明细_${ts}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    message.success(`已导出 ${selectedRows.length} 条采购明细`);
+  }, [selectedRows]);
+
+  // ── Dropdown 菜单配置 ─────────────────────────────────────────
+  const dropdownItems = useMemo<MenuProps['items']>(() => [
+    {
+      key:   'create',
+      icon:  <FileTextOutlined />,
+      label: '📝 创建采购单',
+      onClick: () => setOrderModalOpen(true),
+    },
+    {
+      key:   'download',
+      icon:  <DownloadOutlined />,
+      label: '⬇️ 批量下载/导出',
+      onClick: handleBatchDownload,
+    },
+    { type: 'divider' as const },
+    {
+      key:    'remove',
+      icon:   <DeleteOutlined />,
+      label:  '🗑️ 彻底移除',
+      danger: true,
+      onClick: handleBatchRemove,
+    },
+  ], [handleBatchDownload, handleBatchRemove]);
 
   const columns = useMemo<ColumnsType<PurchasingProduct>>(() => [
     {
@@ -202,28 +303,21 @@ export default function ProcurementPlanning() {
         <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setPage(1); fetchProducts(1, pageSize); }}>刷新</Button>
       </div>
 
-      <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
-        <Space>
+      <div style={{ marginBottom: 16 }}>
+        <Dropdown
+          menu={{ items: dropdownItems }}
+          trigger={['click']}
+          disabled={selectedRowKeys.length === 0}
+        >
           <Button
             type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => {
-              if (selectedRowKeys.length === 0) { message.warning('请先选择需要采购的产品'); return; }
-              setOrderModalOpen(true);
-            }}
-          >
-            创建采购单
-          </Button>
-        </Space>
-        <Space>
-          <Button
             icon={<ToolOutlined />}
             disabled={selectedRowKeys.length === 0}
-            onClick={() => setBatchModalOpen(true)}
+            loading={removing}
           >
-            批量处理{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''}
+            🛠️ 批量处理{selectedRowKeys.length > 0 ? ` (${selectedRowKeys.length})` : ''} <DownOutlined />
           </Button>
-        </Space>
+        </Dropdown>
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -252,17 +346,6 @@ export default function ProcurementPlanning() {
         }}
       />
 
-      <BatchOperationModal
-        open={batchModalOpen}
-        rows={selectedRows}
-        onCancel={() => setBatchModalOpen(false)}
-        onDone={() => {
-          setBatchModalOpen(false);
-          setSelectedRowKeys([]);
-          setSelectedRows([]);
-          fetchProducts(page, pageSize);
-        }}
-      />
 
       <AlibabaMappingModal
         open={!!mappingTarget}
@@ -516,9 +599,38 @@ interface AliAddress {
   isDefault: boolean;
 }
 
+// 弹窗内可编辑行（只需要 id + purchaseQuantity 用于实时计算和提交）
+interface OrderEditRow {
+  id:               number;
+  purchaseQuantity: number;
+}
+
 function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [alibabaResult, setAlibabaResult] = useState<{ success: boolean; aliOrderId?: string; errorMessage?: string } | null>(null);
+
+  // ── 内部可编辑数量副本 ─────────────────────────────────────
+  const [editData, setEditData] = useState<OrderEditRow[]>([]);
+
+  useEffect(() => {
+    if (open) {
+      setEditData(rows.map((r) => ({
+        id:               r.id,
+        purchaseQuantity: r.purchaseQuantity ?? 1,
+      })));
+      setAlibabaResult(null);
+    }
+  }, [open, rows]);
+
+  const updateQuantity = useCallback((id: number, val: number | null) => {
+    setEditData((prev) => prev.map((r) => r.id === id ? { ...r, purchaseQuantity: val ?? 1 } : r));
+  }, []);
+
+  // 根据 editData 实时计算总价
+  const quantityMap = useMemo(() =>
+    Object.fromEntries(editData.map((r) => [r.id, r.purchaseQuantity])),
+    [editData],
+  );
 
   const [addresses, setAddresses] = useState<AliAddress[]>([]);
   const [addrLoading, setAddrLoading] = useState(false);
@@ -527,8 +639,8 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
   const linkedRows = useMemo(() => rows.filter((r) => r.externalProductId), [rows]);
 
   const grandTotal = useMemo(
-    () => rows.reduce((sum, r) => sum + (r.purchasePrice ?? 0) * (r.purchaseQuantity ?? 0), 0),
-    [rows],
+    () => rows.reduce((sum, r) => sum + (r.purchasePrice ?? 0) * (quantityMap[r.id] ?? r.purchaseQuantity ?? 0), 0),
+    [rows, quantityMap],
   );
 
   useEffect(() => {
@@ -553,6 +665,27 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
     setSubmitting(true);
     setAlibabaResult(null);
     try {
+      // ── Step 1：先将修改后的数量持久化到数据库 ──────────────
+      const changedItems = editData
+        .map((ed) => {
+          const orig = rows.find((r) => r.id === ed.id);
+          return orig && ed.purchaseQuantity !== (orig.purchaseQuantity ?? 1)
+            ? { id: ed.id, purchaseQuantity: ed.purchaseQuantity }
+            : null;
+        })
+        .filter(Boolean);
+
+      if (changedItems.length > 0) {
+        const { data: saveRes } = await request.put<{ code: number; message: string }>(
+          '/products/batch-update', { items: changedItems },
+        );
+        if (saveRes.code !== 200) {
+          message.error(saveRes.message || '数量保存失败，请重试');
+          return;
+        }
+      }
+
+      // ── Step 2：创建本地采购单 ────────────────────────────────
       const { data: res } = await request.post<{ code: number; message: string; data: { orderNo: string } }>('/orders', {
         productIds: rows.map((r) => r.id),
       });
@@ -675,15 +808,24 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
         : <span className="text-gray-300">—</span>,
     },
     {
-      title: '数量', dataIndex: 'purchaseQuantity', width: 70, align: 'center',
-      render: (v: number | null) => v != null
-        ? <span className="tabular-nums font-medium" style={{ fontSize: 13 }}>{v}</span>
-        : <span className="text-gray-300">—</span>,
+      title: '数量', dataIndex: 'purchaseQuantity', width: 100, align: 'center',
+      render: (_: unknown, record: PurchasingProduct) => (
+        <InputNumber
+          size="small"
+          value={quantityMap[record.id] ?? record.purchaseQuantity ?? 1}
+          min={1}
+          precision={0}
+          style={{ width: 80 }}
+          suffix="件"
+          onChange={(v) => updateQuantity(record.id, v)}
+        />
+      ),
     },
     {
       title: '合计', key: 'subtotal', width: 110, align: 'right',
       render: (_: unknown, record: PurchasingProduct) => {
-        const sub = (record.purchasePrice ?? 0) * (record.purchaseQuantity ?? 0);
+        const qty = quantityMap[record.id] ?? record.purchaseQuantity ?? 0;
+        const sub = (record.purchasePrice ?? 0) * qty;
         return sub > 0
           ? <span style={{ fontWeight: 700, color: '#1e293b', fontFeatureSettings: '"tnum"', fontSize: 13 }}>¥{sub.toFixed(2)}</span>
           : <span className="text-gray-300">—</span>;
@@ -696,7 +838,7 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
           ? <Tag color="orange" bordered={false} style={{ borderRadius: 6, fontWeight: 600, fontSize: 11 }}>将下单</Tag>
           : <span style={{ color: '#d9d9d9', fontSize: 12 }}>—</span>,
     },
-  ], []);
+  ], [quantityMap, updateQuantity]);
 
   return (
     <Modal
