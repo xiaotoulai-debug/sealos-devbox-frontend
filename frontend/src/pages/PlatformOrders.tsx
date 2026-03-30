@@ -696,7 +696,7 @@ export default function PlatformOrders() {
         </Space>
       </div>
 
-      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
+      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0' }}>
         <Table<Order>
           key={tableKey}
           dataSource={orders}
@@ -704,6 +704,7 @@ export default function PlatformOrders() {
           rowKey={(r) => String(r.id ?? r.platform_order_id ?? r.order_id ?? r.orderId ?? '')}
           loading={loading}
           onChange={handleTableChange}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 310px)' }}
           pagination={{
             current: page,
             pageSize,

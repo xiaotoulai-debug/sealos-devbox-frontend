@@ -48,14 +48,27 @@ const SUPER_ADMIN_ROLE_NAME = '超级管理员';
 // 判断依据（优先级从高到低）：
 //   1. 后端登录时在 role 中返回 isAdmin: true（推荐，最严谨）
 //   2. role.name === '超级管理员'（兜底：后端未返回 isAdmin 字段时生效）
-//   3. localStorage 中从未存储过 permissions（老会话向后兼容）
+//   3. localStorage 中从未存储过 user 信息（纯未登录状态），此时放行以兼容老会话
 // 若以上均为 false，则视为普通用户，进入 permissions 数组比对流程。
+// ⚠ 不再以 permissions===null 作为超管依据：子账号登录时若后端未返回 isAdmin，
+//   不应因为 permissions 缺失而错误放行全部菜单。
 export function isAdminUser(): boolean {
+  const user = getStoredUser();
+  if (!user) {
+    // 没有 user 信息：完全未登录状态，permissions 的 null 视为老会话兼容
+    return getStoredPermissions() === null;
+  }
+  if (user.role?.isAdmin === true) return true;
+  if (user.role?.name === SUPER_ADMIN_ROLE_NAME) return true;
+  return false;
+}
+
+/** 仅超级管理员（不含「老会话 permissions 为空」的宽泛兼容），用于高危操作入口 */
+export function isSuperAdminUser(): boolean {
   const user = getStoredUser();
   if (user?.role?.isAdmin === true) return true;
   if (user?.role?.name === SUPER_ADMIN_ROLE_NAME) return true;
-  // 老会话：permissions 键不存在，默认不过滤菜单
-  return getStoredPermissions() === null;
+  return false;
 }
 
 // ── 检查单个权限码 ─────────────────────────────────────────────

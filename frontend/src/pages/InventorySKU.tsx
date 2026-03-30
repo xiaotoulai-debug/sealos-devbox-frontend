@@ -1,20 +1,45 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Input, Button, Empty, Image, Tooltip, message,
-  Dropdown, Modal, Space, InputNumber, Divider, Upload, Popconfirm,
+  Dropdown, Modal, Space, InputNumber, Divider, Upload,
+  Form, Select,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import type { MenuProps } from 'antd';
 import {
   SearchOutlined, ShoppingOutlined, ReloadOutlined, DatabaseOutlined, LinkOutlined,
-  ToolOutlined, FileTextOutlined, ThunderboltOutlined, HomeOutlined, EditOutlined,
+  ToolOutlined, FileTextOutlined, HomeOutlined, EditOutlined,
   DownOutlined, PlusOutlined, AppstoreAddOutlined, ExportOutlined, GlobalOutlined,
   UploadOutlined, DeleteOutlined,
 } from '@ant-design/icons';
+import axios from 'axios';
 import request from '../lib/request';
+import { isSuperAdminUser } from '../lib/auth';
 import AlibabaMappingModal from '../components/AlibabaMappingModal';
 import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
 import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
+
+interface WarehouseStock {
+  warehouseId:         number;
+  warehouseName:       string;
+  stockQuantity:       number;
+  lockedQuantity?:     number | null;
+  inTransitQuantity?:  number | null;
+  /** 仓维度销量（后端字段名以接口为准） */
+  sales7?:             number | null;
+  sales14?:            number | null;
+  sales30?:            number | null;
+  /** 入库成本（含运费），人民币 */
+  unitCost?:           number | null;
+}
+
+/** 兼容接口可能返回的下划线字段 */
+type WarehouseStockRow = WarehouseStock & {
+  sales_7?:   number | null;
+  sales_14?:  number | null;
+  sales_30?:  number | null;
+  unit_cost?: number | null;
+};
 
 interface InventoryProduct {
   id:             number;
@@ -33,6 +58,7 @@ interface InventoryProduct {
   height:         number | null;
   actualWeight:   number | null;
   stockActual:    number;
+  stockTotal?:    number | null;   // 后端新增：多仓汇总总库存
   stockInTransit: number;
   sales7d:        number;
   sales14d:       number;
@@ -42,6 +68,7 @@ interface InventoryProduct {
   externalProductId: string | null;
   externalSkuId:     string | null;
   updatedAt:      string;
+  warehouseStocks?: WarehouseStock[] | null;  // 后端新增：各仓明细
 }
 
 interface InventorySKUProps {
@@ -59,16 +86,17 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
 
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [selectedRows,    setSelectedRows]    = useState<InventoryProduct[]>([]);
-  const [stockModalOpen,   setStockModalOpen]   = useState(false);
   const [batchEditOpen,    setBatchEditOpen]    = useState(false);
   const [repeatModalOpen,  setRepeatModalOpen]  = useState(false);
   const [createModalOpen,  setCreateModalOpen]  = useState(false);
   const [batchCreateOpen,  setBatchCreateOpen]  = useState(false);
   const [editModalOpen,    setEditModalOpen]    = useState(false);
   const [editTarget,       setEditTarget]       = useState<InventoryProduct | null>(null);
+  const [adjustStockOpen,  setAdjustStockOpen]  = useState(false);
   const [exporting,        setExporting]        = useState(false);
   const [mappingTarget,    setMappingTarget]    = useState<InventoryProduct | null>(null);
-  const [deleting,         setDeleting]         = useState<number | null>(null);
+  /** 多仓明细行受控展开（支持一键全部展开/收起） */
+  const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
 
   const fetchProducts = useCallback(async (p: number, ps: number, kw: string) => {
     setLoading(true);
@@ -98,6 +126,20 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
     fetchProducts(page, pageSize, keyword);
   }, [fetchProducts, page, pageSize, keyword]);
 
+  // 翻页后清空展开态，避免 rowKey 与当前页不一致
+  useEffect(() => {
+    setExpandedRowKeys([]);
+  }, [page, pageSize]);
+
+  const toggleExpandAllWarehouseRows = useCallback(() => {
+    if (products.length === 0) return;
+    if (expandedRowKeys.length === 0) {
+      setExpandedRowKeys(products.map((p) => p.id));
+    } else {
+      setExpandedRowKeys([]);
+    }
+  }, [products, expandedRowKeys.length]);
+
   const handlePageChange = useCallback((pag: TablePaginationConfig) => {
     const np = pag.current ?? 1;
     const ns = pag.pageSize ?? pageSize;
@@ -111,26 +153,6 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
     setPage(1);
     fetchProducts(1, pageSize, value);
   }, [fetchProducts, pageSize]);
-
-  // ── 删除单个 SKU ─────────────────────────────────────────────
-  const handleDelete = useCallback(async (record: InventoryProduct) => {
-    setDeleting(record.id);
-    try {
-      const { data: res } = await request.delete<{ code: number; message: string }>(
-        `/products/inventory/${record.id}`,
-      );
-      if (res.code === 200) {
-        message.success(res.message || '删除成功');
-        refresh();
-      } else {
-        message.error(res.message || '删除失败');
-      }
-    } catch {
-      message.error('删除失败，请检查网络或后端服务');
-    } finally {
-      setDeleting(null);
-    }
-  }, [refresh]);
 
   const hasSelected = selectedRowKeys.length > 0;
 
@@ -181,13 +203,66 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
     finally { setExporting(false); }
   }, [keyword]);
 
-  const dropdownItems: MenuProps['items'] = useMemo(() => [
-    { key: 'purchasing', icon: <FileTextOutlined />, label: '📝 创建采购计划', onClick: () => setRepeatModalOpen(true) },
-    { key: 'stock',      icon: <ThunderboltOutlined />, label: '⚡ 快速调整库存', onClick: () => setStockModalOpen(true) },
-    { key: 'warehouse',  icon: <HomeOutlined />, label: '🏭 批量添加仓库', disabled: true, onClick: () => message.info('功能开发中，敬请期待') },
-    { type: 'divider' as const },
-    { key: 'edit',       icon: <EditOutlined />, label: '✏️ 批量修改内容', onClick: () => setBatchEditOpen(true) },
-  ], []);
+  const dropdownItems: MenuProps['items'] = useMemo(() => {
+    const base: MenuProps['items'] = [
+      { key: 'purchasing',    icon: <FileTextOutlined />,   label: '📝 创建采购计划',  onClick: () => setRepeatModalOpen(true) },
+      { key: 'adjust-stock',  icon: <EditOutlined />,       label: '✏️ 批量修改库存',  onClick: () => setAdjustStockOpen(true) },
+    ];
+    if (isSuperAdminUser()) {
+      base.push({
+        key: 'batch-delete',
+        icon: <DeleteOutlined />,
+        label: '批量删除',
+        danger: true,
+        disabled: !hasSelected,
+        onClick: () => {
+          const ids = selectedRows.map((r) => r.id);
+          if (ids.length === 0) return;
+          const n = ids.length;
+          Modal.confirm({
+            title: (
+              <span style={{ color: '#cf1322', fontWeight: 600 }}>
+                确认要删除选中的 {n} 个产品吗？
+              </span>
+            ),
+            content:
+              '此操作不可逆！如果该产品已有库存或关联的单据，强制删除可能导致系统数据异常。请确认！',
+            okText: '确认删除',
+            okType: 'danger',
+            cancelText: '取消',
+            onOk: async () => {
+              try {
+                const { data: res } = await request.post<{
+                  code: number;
+                  message: string;
+                  data?: { count?: number };
+                }>('/products/inventory-batch-delete', { ids });
+                if (res.code === 200) {
+                  const c = res.data?.count ?? ids.length;
+                  message.success(res.message || `已删除 ${c} 个产品`);
+                  setSelectedRowKeys([]);
+                  setSelectedRows([]);
+                  refresh();
+                } else {
+                  message.error(res.message || '删除失败');
+                  return Promise.reject(new Error(res.message || 'delete failed'));
+                }
+              } catch {
+                message.error('删除失败，请检查网络或后端服务');
+                return Promise.reject(new Error('network'));
+              }
+            },
+          });
+        },
+      });
+    }
+    base.push(
+      { key: 'warehouse', icon: <HomeOutlined />, label: '🏭 批量添加仓库', disabled: true, onClick: () => message.info('功能开发中，敬请期待') },
+      { type: 'divider' as const },
+      { key: 'edit', icon: <EditOutlined />, label: '✏️ 批量修改内容', onClick: () => setBatchEditOpen(true) },
+    );
+    return base;
+  }, [hasSelected, selectedRows, refresh]);
 
   const addExportItems: MenuProps['items'] = useMemo(() => [
     { key: 'create',       icon: <PlusOutlined />,         label: '➕ 手动创建 SKU',   onClick: () => setCreateModalOpen(true) },
@@ -276,31 +351,9 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
       },
     },
     {
-      title: '当前库存', dataIndex: 'stockActual', width: 100, align: 'center',
-      sorter: (a, b) => a.stockActual - b.stockActual,
-      render: (v: number) => (
-        <span style={{ fontWeight: 700, fontSize: 15, color: '#1890ff', fontFeatureSettings: '"tnum"' }}>{v}</span>
-      ),
-    },
-    {
-      title: '在途库存', dataIndex: 'stockInTransit', width: 100, align: 'center',
-      sorter: (a, b) => a.stockInTransit - b.stockInTransit,
-      render: (v: number) => (
-        <span style={{ fontWeight: 600, fontSize: 14, color: v > 0 ? '#fa8c16' : '#d9d9d9', fontFeatureSettings: '"tnum"' }}>{v}</span>
-      ),
-    },
-    {
-      title: '销量 (7/14/30)', key: 'sales', width: 150, align: 'center',
+      title: '操作', key: 'action', width: 200, align: 'center', fixed: 'right',
       render: (_: unknown, record: InventoryProduct) => (
-        <span style={{ fontWeight: 600, fontSize: 13, color: '#334155', fontFeatureSettings: '"tnum"', letterSpacing: 0.3 }}>
-          {record.sales7d ?? 0} / {record.sales14d ?? 0} / {record.sales30d ?? 0}
-        </span>
-      ),
-    },
-    {
-      title: '操作', key: 'action', width: 140, align: 'center', fixed: 'right',
-      render: (_: unknown, record: InventoryProduct) => (
-        <Space size={4}>
+        <Space size={4} wrap>
           <Button
             type="link"
             size="small"
@@ -310,110 +363,95 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
           >
             编辑
           </Button>
-          <Popconfirm
-            title="确认删除该 SKU 吗？"
-            description={
-              <span>
-                SKU：<b>{record.sku ?? '—'}</b> 将被永久删除，此操作不可恢复。
-              </span>
-            }
-            onConfirm={() => handleDelete(record)}
-            okText="确认删除"
-            okType="danger"
-            cancelText="取消"
-            placement="topRight"
-          >
-            <Button
-              type="link"
-              size="small"
-              danger
-              icon={<DeleteOutlined />}
-              loading={deleting === record.id}
-              style={{ padding: '0 4px' }}
+          {record.externalProductId ? (
+            <Tooltip title={`已绑定: #${record.externalProductId}`}>
+              <Button type="link" size="small" onClick={() => setMappingTarget(record)}
+                style={{ color: '#ff6a00', fontWeight: 600, padding: '0 4px', fontSize: 12 }}
+              >
+                1688
+              </Button>
+            </Tooltip>
+          ) : (
+            <Button type="link" size="small" onClick={() => setMappingTarget(record)}
+              style={{ color: '#bfbfbf', padding: '0 4px', fontSize: 12 }}
             >
-              删除
+              关联1688
             </Button>
-          </Popconfirm>
+          )}
+          {record.publishStatus === 'PUBLISHED' || record.status === 'PURCHASING' || record.status === 'ORDERED' ? (
+            <Tag color="blue" bordered={false} style={{ borderRadius: 6, fontWeight: 600, margin: 0 }}>采购中</Tag>
+          ) : (
+            <Tag color="green" bordered={false} style={{ borderRadius: 6, fontWeight: 600, margin: 0 }}>已建库</Tag>
+          )}
         </Space>
       ),
     },
-    {
-      title: '1688', key: 'alibaba', width: 80, align: 'center',
-      render: (_: unknown, record: InventoryProduct) => {
-        if (record.externalProductId) {
-          return (
-            <Tooltip title={`已绑定: #${record.externalProductId}`}>
-              <Button type="link" size="small" onClick={() => setMappingTarget(record)}
-                style={{ color: '#ff6a00', fontWeight: 600, padding: 0, fontSize: 12 }}
-              >
-                ✅ 已关联
-              </Button>
-            </Tooltip>
-          );
-        }
-        return (
-          <Button type="link" size="small" onClick={() => setMappingTarget(record)}
-            style={{ color: '#bfbfbf', padding: 0, fontSize: 12 }}
-          >
-            🔗 关联
-          </Button>
-        );
-      },
-    },
-    {
-      title: '阶段', key: 'phase', width: 90, align: 'center',
-      render: (_: unknown, record: InventoryProduct) => {
-        if (record.publishStatus === 'PUBLISHED' || record.status === 'PURCHASING' || record.status === 'ORDERED')
-          return <Tag color="blue" bordered={false} style={{ borderRadius: 6, fontWeight: 600 }}>采购中</Tag>;
-        return <Tag color="green" bordered={false} style={{ borderRadius: 6, fontWeight: 600 }}>已建库</Tag>;
-      },
-    },
-  ], [deleting, handleDelete]);
+  ], []);
 
   return (
     <div className="min-h-full">
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h2 className="text-lg font-semibold text-gray-800 m-0 flex items-center gap-2">
-            <DatabaseOutlined style={{ color: '#1890ff', fontSize: 20 }} />
-            库存 SKU
-          </h2>
-          <p className="text-sm text-gray-400 mt-0.5">
-            共 <span className="font-semibold text-gray-700 text-base">{total}</span> 个已建库产品
-          </p>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, marginLeft: 32 }}>
-          <Dropdown menu={{ items: dropdownItems }} disabled={!hasSelected} trigger={['click']}>
-            <Button icon={<ToolOutlined />} disabled={!hasSelected}>
-              🛠️ 批量处理{hasSelected ? ` (${selectedRowKeys.length})` : ''} <DownOutlined />
+      <div
+        style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 100,
+          backgroundColor: '#fff',
+          paddingBottom: 16,
+          marginBottom: 20,
+          boxShadow: '0 1px 0 rgba(0, 0, 0, 0.06)',
+        }}
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800 m-0 flex items-center gap-2">
+              <DatabaseOutlined style={{ color: '#1890ff', fontSize: 20 }} />
+              库存 SKU
+            </h2>
+            <p className="text-sm text-gray-400 mt-0.5">
+              共 <span className="font-semibold text-gray-700 text-base">{total}</span> 个已建库产品
+            </p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: 1, marginLeft: 32 }}>
+            <Button
+              type="default"
+              onClick={toggleExpandAllWarehouseRows}
+              disabled={products.length === 0 || loading}
+            >
+              {expandedRowKeys.length === 0 ? '[+]' : '[-]'} 展开/收起多仓明细
             </Button>
-          </Dropdown>
-          <Dropdown menu={{ items: addExportItems }} trigger={['click']}>
-            <Button icon={<PlusOutlined />} loading={exporting}>
-              📥 添加/导出 <DownOutlined />
+            <Dropdown menu={{ items: dropdownItems }} disabled={!hasSelected} trigger={['click']}>
+              <Button icon={<ToolOutlined />} disabled={!hasSelected}>
+                🛠️ 批量处理{hasSelected ? ` (${selectedRowKeys.length})` : ''} <DownOutlined />
+              </Button>
+            </Dropdown>
+            <Dropdown menu={{ items: addExportItems }} trigger={['click']}>
+              <Button icon={<PlusOutlined />} loading={exporting}>
+                📥 添加/导出 <DownOutlined />
+              </Button>
+            </Dropdown>
+            <div style={{ flex: 1 }} />
+            <Input.Search
+              placeholder="搜索 SKU 或中文名"
+              allowClear
+              onSearch={handleSearch}
+              style={{ width: 280 }}
+              enterButton={<SearchOutlined />}
+            />
+            <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setPage(1); fetchProducts(1, pageSize, keyword); }}>
+              刷新
             </Button>
-          </Dropdown>
-          <div style={{ flex: 1 }} />
-          <Input.Search
-            placeholder="搜索 SKU 或中文名"
-            allowClear
-            onSearch={handleSearch}
-            style={{ width: 280 }}
-            enterButton={<SearchOutlined />}
-          />
-          <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setPage(1); fetchProducts(1, pageSize, keyword); }}>
-            刷新
-          </Button>
+          </div>
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      {/* 勿用 overflow:hidden，否则会打断 Table sticky 表头 */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100">
         <Table
           rowKey="id"
           dataSource={products}
           columns={columns}
           loading={loading}
-          scroll={{ x: 1400 }}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 280px)' }}
           size="large"
           onChange={handlePageChange}
           rowSelection={{
@@ -436,21 +474,209 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
             ),
           }}
           rowClassName="align-middle"
+          expandable={{
+            expandedRowKeys,
+            onExpandedRowsChange: (keys) => setExpandedRowKeys([...keys]),
+            expandedRowRender: (record) => {
+              const stocks = record.warehouseStocks ?? [];
+              if (stocks.length === 0) {
+                return (
+                  <div style={{ padding: '4px 12px 4px 48px', background: '#f1f5f9', color: '#94a3b8', fontSize: 12 }}>
+                    暂无仓库明细
+                  </div>
+                );
+              }
+              return (
+                <div style={{ background: '#f1f5f9', margin: 0, padding: 0 }}>
+                  <Table<WarehouseStock>
+                    rowKey="warehouseId"
+                    dataSource={stocks}
+                    pagination={false}
+                    size="small"
+                    bordered={false}
+                    showHeader
+                    scroll={{ x: 'max-content' }}
+                    style={{ margin: 0 }}
+                    className="inv-sku-expanded-subtable"
+                    components={{
+                      header: {
+                        cell: (props: React.ThHTMLAttributes<HTMLTableCellElement>) => (
+                          <th
+                            {...props}
+                            style={{
+                              ...(props.style as React.CSSProperties | undefined),
+                              background: 'transparent',
+                              borderBottom: 'none',
+                              color: '#888',
+                              padding: '2px 8px 4px',
+                              fontSize: 12,
+                              fontWeight: 500,
+                            }}
+                          />
+                        ),
+                      },
+                      body: {
+                        cell: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
+                          <td
+                            {...props}
+                            style={{
+                              ...(props.style as React.CSSProperties | undefined),
+                              padding: '4px 8px',
+                              borderBottom: '1px solid #e8ecf0',
+                            }}
+                          />
+                        ),
+                      },
+                    }}
+                    columns={[
+                      {
+                        // 幽灵占位列：展开箭头(~32px) + 复选框(~32px) + 图片列(80px) = 约 144px
+                        // 如需调整对齐，修改此 width 数值（+/-8px 微调）
+                        title: '',
+                        key: 'ghost',
+                        dataIndex: 'ghost',
+                        width: 144,
+                        render: () => null,
+                      },
+                      {
+                        title: '仓库名称',
+                        dataIndex: 'warehouseName',
+                        key: 'warehouseName',
+                        width: 192,
+                        ellipsis: true,
+                        render: (name: string) => (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                            <HomeOutlined style={{ color: '#bfbfbf', fontSize: 11 }} />
+                            <span style={{ color: '#8c8c8c', fontSize: 13, fontWeight: 400 }}>{name}</span>
+                          </span>
+                        ),
+                      },
+                      {
+                        title: '物理库存',
+                        dataIndex: 'stockQuantity',
+                        key: 'stockQuantity',
+                        width: 88,
+                        align: 'center',
+                        render: (v: number | null | undefined) => (
+                          <span style={{ fontWeight: 700, color: '#1890ff', fontFeatureSettings: '"tnum"', fontSize: 13 }}>
+                            {v ?? 0}
+                          </span>
+                        ),
+                      },
+                      {
+                        title: '在途库存',
+                        key: 'inTransitQuantity',
+                        width: 88,
+                        align: 'center',
+                        render: (_: unknown, r: WarehouseStock) => {
+                          const v = r.inTransitQuantity ?? 0;
+                          return (
+                            <span style={{ fontWeight: 600, fontFeatureSettings: '"tnum"', fontSize: 13, color: v > 0 ? '#fa8c16' : '#d9d9d9' }}>
+                              {v}
+                            </span>
+                          );
+                        },
+                      },
+                      {
+                        title: '配货锁定',
+                        key: 'lockedQuantity',
+                        width: 88,
+                        align: 'center',
+                        render: (_: unknown, r: WarehouseStock) => {
+                          const locked = r.lockedQuantity ?? 0;
+                          return (
+                            <span style={{ fontWeight: 600, fontFeatureSettings: '"tnum"', fontSize: 13, color: locked > 0 ? '#f59e0b' : '#d9d9d9' }}>
+                              {locked}
+                            </span>
+                          );
+                        },
+                      },
+                      {
+                        title: '可用发货库存',
+                        key: 'available',
+                        width: 104,
+                        align: 'center',
+                        render: (_: unknown, r: WarehouseStock) => {
+                          const avail = (r.stockQuantity ?? 0) - (r.lockedQuantity ?? 0);
+                          return (
+                            <span style={{
+                              fontWeight: 700,
+                              fontFeatureSettings: '"tnum"',
+                              fontSize: 13,
+                              color: avail <= 0 ? '#d9d9d9' : avail <= 10 ? '#ff4d4f' : '#52c41a',
+                            }}>
+                              {avail}
+                            </span>
+                          );
+                        },
+                      },
+                      {
+                        title: '销量 (7/14/30)',
+                        key: 'sales71430',
+                        width: 148,
+                        align: 'center',
+                        render: (_: unknown, r: WarehouseStock) => {
+                          const row = r as WarehouseStockRow;
+                          const s7 = row.sales7 ?? row.sales_7 ?? 0;
+                          const s14 = row.sales14 ?? row.sales_14 ?? 0;
+                          const s30 = row.sales30 ?? row.sales_30 ?? 0;
+                          return (
+                            <span style={{ fontWeight: 600, fontSize: 12, color: '#334155', fontFeatureSettings: '"tnum"' }}>
+                              {s7} / {s14} / {s30}
+                            </span>
+                          );
+                        },
+                      },
+                      {
+                        title: '入库成本(含运费)',
+                        key: 'unitCost',
+                        width: 128,
+                        align: 'right',
+                        render: (_: unknown, r: WarehouseStock) => {
+                          const row = r as WarehouseStockRow;
+                          const c = row.unitCost ?? row.unit_cost;
+                          if (c == null || Number.isNaN(Number(c))) {
+                            return <span style={{ color: '#d9d9d9', fontSize: 12 }}>—</span>;
+                          }
+                          return (
+                            <span style={{
+                              fontWeight: 800,
+                              fontSize: 13,
+                              color: '#a16207',
+                              fontFeatureSettings: '"tnum"',
+                            }}>
+                              ¥ {Number(c).toFixed(2)}
+                            </span>
+                          );
+                        },
+                      },
+                    ]}
+                  />
+                </div>
+              );
+            },
+            expandRowByClick: false,
+          }}
         />
       </div>
-
-      <StockAdjustModal
-        open={stockModalOpen}
-        rows={selectedRows}
-        onCancel={() => setStockModalOpen(false)}
-        onDone={() => { setStockModalOpen(false); refresh(); }}
-      />
 
       <BatchEditModal
         open={batchEditOpen}
         rows={selectedRows}
         onCancel={() => setBatchEditOpen(false)}
         onDone={() => { setBatchEditOpen(false); refresh(); }}
+      />
+
+      <BatchAdjustInventoryModal
+        open={adjustStockOpen}
+        rows={selectedRows}
+        onCancel={() => setAdjustStockOpen(false)}
+        onDone={() => {
+          setAdjustStockOpen(false);
+          setSelectedRowKeys([]);
+          setSelectedRows([]);
+          refresh();
+        }}
       />
 
       <RepeatPurchaseModal
@@ -505,145 +731,6 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
 }
 
 // ─── 返单采购配置弹窗（已提取至 components/RepeatPurchaseModal.tsx）────
-
-// ─── 批量库存盘点弹窗 ───────────────────────────────────────────
-
-interface StockRow {
-  id:          number;
-  imageUrl:    string | null;
-  sku:         string | null;
-  currentStock: number;
-  newStock:    number;
-}
-
-interface StockAdjustModalProps {
-  open: boolean;
-  rows: InventoryProduct[];
-  onCancel: () => void;
-  onDone: () => void;
-}
-
-function StockAdjustModal({ open, rows, onCancel, onDone }: StockAdjustModalProps) {
-  const [editData, setEditData] = useState<StockRow[]>([]);
-  const [loading,  setLoading]  = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setEditData(rows.map((r) => ({
-        id:           r.id,
-        imageUrl:     r.imageUrl,
-        sku:          r.sku,
-        currentStock: r.stockActual,
-        newStock:     r.stockActual,
-      })));
-    }
-  }, [open, rows]);
-
-  const updateStock = useCallback((idx: number, val: number | null) => {
-    setEditData((prev) => prev.map((row, i) => i === idx ? { ...row, newStock: val ?? 0 } : row));
-  }, []);
-
-  const handleConfirm = async () => {
-    setLoading(true);
-    try {
-      const items = editData.map((r) => ({ id: r.id, stockActual: r.newStock }));
-      const { data: res } = await request.put<{ code: number; message: string; data: { count: number } }>(
-        '/products/batch-stock-set', { items },
-      );
-      if (res.code === 200) {
-        message.success(`库存盘点完成，已成功更新 ${res.data?.count ?? 0} 个 SKU 的库存数量`);
-        onDone();
-      } else { message.error(res.message); }
-    } catch { message.error('盘点失败'); }
-    finally { setLoading(false); }
-  };
-
-  return (
-    <Modal
-      title={
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <ThunderboltOutlined style={{ color: '#faad14', fontSize: 18 }} />
-          <span style={{ fontWeight: 600, fontSize: 16 }}>📋 批量库存盘点</span>
-          <Tag color="orange" bordered={false} style={{ fontWeight: 600, fontSize: 13, borderRadius: 6 }}>{rows.length} 款产品</Tag>
-        </div>
-      }
-      open={open} onCancel={onCancel} destroyOnClose maskClosable={false} width={800}
-      footer={[
-        <Button key="cancel" onClick={onCancel}>取消</Button>,
-        <Button key="ok" type="primary" loading={loading} onClick={handleConfirm}>
-          确认应用
-        </Button>,
-      ]}
-    >
-      <div style={{ fontSize: 13, color: '#8c8c8c', marginBottom: 14 }}>
-        直接填写每个 SKU 盘点后的实际库存数量，点击「确认应用」后将覆盖更新。
-      </div>
-
-      <div style={{ maxHeight: 440, overflowY: 'auto', border: '1px solid #e8e8e8', borderRadius: 10, background: '#fff' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead>
-            <tr style={{ background: '#1e293b', position: 'sticky', top: 0, zIndex: 1 }}>
-              <th style={{ ...sthStyle, width: 220, borderRadius: '10px 0 0 0' }}>产品</th>
-              <th style={{ ...sthStyle, width: 140, textAlign: 'center' }}>当前库存</th>
-              <th style={{ ...sthStyle, width: 200, textAlign: 'center' }}>→</th>
-              <th style={{ ...sthStyle, width: 200, borderRadius: '0 10px 0 0', textAlign: 'center' }}>盘点后库存</th>
-            </tr>
-          </thead>
-          <tbody>
-            {editData.map((row, idx) => {
-              const changed = row.newStock !== row.currentStock;
-              return (
-                <tr key={row.id} style={{ borderBottom: '1px solid #f0f0f0', transition: 'background 0.15s' }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = '#f8fafc'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = ''; }}
-                >
-                  <td style={{ ...stdStyle, background: '#f9fafb', borderRight: '1px solid #f0f0f0' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      {row.imageUrl
-                        ? <img src={row.imageUrl} width={36} height={36} referrerPolicy="no-referrer" style={{ borderRadius: 6, objectFit: 'cover', border: '1px solid #e8e8e8', flexShrink: 0 }} />
-                        : <div style={{ width: 36, height: 36, borderRadius: 6, background: '#f0f0f0', flexShrink: 0 }} />}
-                      <span style={{ fontFamily: "'Inter', monospace", fontSize: 12, fontWeight: 500, letterSpacing: 0.3, color: '#1e293b' }}>
-                        {row.sku || '—'}
-                      </span>
-                    </div>
-                  </td>
-                  <td style={{ ...stdStyle, textAlign: 'center' }}>
-                    <span style={{ fontWeight: 700, fontSize: 16, color: '#1890ff', fontFeatureSettings: '"tnum"' }}>
-                      {row.currentStock}
-                    </span>
-                  </td>
-                  <td style={{ ...stdStyle, textAlign: 'center' }}>
-                    <span style={{ color: changed ? '#52c41a' : '#d9d9d9', fontSize: 16 }}>→</span>
-                  </td>
-                  <td style={{ ...stdStyle, textAlign: 'center' }}>
-                    <InputNumber
-                      size="middle"
-                      value={row.newStock}
-                      onChange={(v) => updateStock(idx, v)}
-                      min={0}
-                      precision={0}
-                      style={{ width: 120 }}
-                      status={changed ? undefined : undefined}
-                    />
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Modal>
-  );
-}
-
-const sthStyle: React.CSSProperties = {
-  padding: '12px 14px', textAlign: 'left', fontSize: 12,
-  color: '#e2e8f0', fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase',
-  whiteSpace: 'nowrap',
-};
-const stdStyle: React.CSSProperties = {
-  padding: '10px 14px', verticalAlign: 'middle',
-};
 
 // ─── 批量编辑工作台弹窗 ─────────────────────────────────────────
 
@@ -1396,3 +1483,254 @@ const bcthStyle: React.CSSProperties = {
 const bctdStyle: React.CSSProperties = {
   padding: '8px 10px', verticalAlign: 'middle',
 };
+
+// ─── 批量修改库存弹窗 ──────────────────────────────────────────
+interface AdjustRow {
+  id:         number;
+  sku:        string;
+  chineseName: string;
+  imageUrl:   string | null;
+  currentStock: number;
+  newStock:   number;
+  remark:     string;
+}
+
+interface BatchAdjustInventoryModalProps {
+  open:     boolean;
+  rows:     InventoryProduct[];
+  onCancel: () => void;
+  onDone:   () => void;
+}
+
+interface WarehouseListItem {
+  id:     number;
+  name:   string;
+  status: 'ACTIVE' | 'DISABLED';
+}
+
+function BatchAdjustInventoryModal({ open, rows, onCancel, onDone }: BatchAdjustInventoryModalProps) {
+  const [form] = Form.useForm<{ warehouseId: number }>();
+  const [editRows,   setEditRows]   = useState<AdjustRow[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [warehouseLoading, setWarehouseLoading] = useState(false);
+  const [warehouseOptions, setWarehouseOptions] = useState<{ label: string; value: number }[]>([]);
+
+  // 每次打开时，用当前库存初始化 newStock，并拉取可用仓库
+  useEffect(() => {
+    if (open) {
+      form.resetFields();
+      setEditRows(rows.map((r) => ({
+        id:           r.id,
+        sku:          r.sku ?? '-',
+        chineseName:  r.chineseName ?? '-',
+        imageUrl:     r.imageUrl,
+        currentStock: r.stockActual ?? 0,
+        newStock:     r.stockActual ?? 0,
+        remark:       '',
+      })));
+      setWarehouseLoading(true);
+      request
+        .get<{ code: number; data?: WarehouseListItem[]; message?: string }>('/warehouses')
+        .then(({ data: res }) => {
+          if (res.code === 200) {
+            const list = Array.isArray(res.data) ? res.data : [];
+            const active = list.filter((w) => w.status === 'ACTIVE');
+            setWarehouseOptions(active.map((w) => ({ label: w.name, value: w.id })));
+          } else {
+            message.error(res.message || '加载仓库列表失败');
+            setWarehouseOptions([]);
+          }
+        })
+        .catch(() => {
+          message.error('加载仓库列表失败，请稍后重试');
+          setWarehouseOptions([]);
+        })
+        .finally(() => setWarehouseLoading(false));
+    }
+  }, [open, rows, form]);
+
+  const updateRow = useCallback((id: number, field: 'newStock' | 'remark', value: number | string | null) => {
+    setEditRows((prev) =>
+      prev.map((r) => r.id === id ? { ...r, [field]: value ?? (field === 'newStock' ? 0 : '') } : r),
+    );
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    try {
+      await form.validateFields();
+    } catch {
+      return;
+    }
+    const warehouseId = form.getFieldValue('warehouseId') as number;
+    if (warehouseId == null) {
+      message.warning('请选择目标仓库');
+      return;
+    }
+    // 只提交发生变化的行
+    const changed = editRows.filter((r) => r.newStock !== r.currentStock || r.remark.trim() !== '');
+    if (changed.length === 0) {
+      message.info('没有检测到库存变化，无需提交');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const payload = {
+        warehouseId,
+        items: changed.map((r) => ({
+          // 后端契约：产品主键必须为 productId（不可误用 skuId）
+          productId: r.id,
+          newStock:  r.newStock,
+          remark:    r.remark.trim() || undefined,
+        })),
+      };
+      console.log('Batch Adjust Payload:', payload);
+      const { data: res } = await request.post<{ code: number; message: string }>(
+        '/inventory/batch-adjust',
+        payload,
+      );
+      if (res.code === 200) {
+        message.success(res.message || `已成功调整 ${changed.length} 个 SKU 的库存`);
+        onDone();
+      } else {
+        message.error(res.message || '提交失败，请重试');
+      }
+    } catch (err: unknown) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data as { message?: string } | undefined)?.message
+        : undefined;
+      message.error(msg || '提交失败，请重试');
+    } finally {
+      setSubmitting(false);
+    }
+  }, [editRows, form, onDone]);
+
+  const changedCount = editRows.filter((r) => r.newStock !== r.currentStock).length;
+
+  const columns = [
+    {
+      title: '图片',
+      key: 'image',
+      width: 64,
+      align: 'center' as const,
+      render: (_: unknown, r: AdjustRow) => r.imageUrl ? (
+        <img
+          src={r.imageUrl}
+          referrerPolicy="no-referrer"
+          style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, border: '1px solid #f0f0f0' }}
+        />
+      ) : (
+        <div style={{ width: 44, height: 44, background: '#f5f5f5', borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, color: '#94a3b8' }}>无图</div>
+      ),
+    },
+    {
+      title: 'SKU / 中文名',
+      key: 'name',
+      render: (_: unknown, r: AdjustRow) => (
+        <div>
+          <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{r.sku}</div>
+          <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{r.chineseName}</div>
+        </div>
+      ),
+    },
+    {
+      title: '当前库存',
+      key: 'current',
+      width: 90,
+      align: 'center' as const,
+      render: (_: unknown, r: AdjustRow) => (
+        <span style={{ fontWeight: 600, color: '#475569', fontFeatureSettings: '"tnum"' }}>{r.currentStock}</span>
+      ),
+    },
+    {
+      title: '盘点后库存',
+      key: 'newStock',
+      width: 130,
+      align: 'center' as const,
+      render: (_: unknown, r: AdjustRow) => {
+        const isDiff = r.newStock !== r.currentStock;
+        return (
+          <InputNumber
+            value={r.newStock}
+            min={0}
+            precision={0}
+            size="small"
+            style={{
+              width: 100,
+              borderColor: isDiff ? '#f59e0b' : undefined,
+              background: isDiff ? '#fffbeb' : undefined,
+            }}
+            onChange={(v) => updateRow(r.id, 'newStock', v)}
+          />
+        );
+      },
+    },
+    {
+      title: '备注',
+      key: 'remark',
+      render: (_: unknown, r: AdjustRow) => (
+        <Input
+          size="small"
+          placeholder="变更原因（选填）"
+          maxLength={100}
+          value={r.remark}
+          onChange={(e) => updateRow(r.id, 'remark', e.target.value)}
+        />
+      ),
+    },
+  ];
+
+  return (
+    <Modal
+      title={
+        <span>
+          <EditOutlined style={{ color: '#f59e0b', marginRight: 8 }} />
+          批量修改库存
+          {changedCount > 0 && (
+            <span style={{ marginLeft: 8, fontSize: 12, color: '#f59e0b', fontWeight: 400 }}>
+              （已修改 {changedCount} 项）
+            </span>
+          )}
+        </span>
+      }
+      open={open}
+      onCancel={onCancel}
+      width={780}
+      okText="确认修改"
+      cancelText="取消"
+      confirmLoading={submitting}
+      onOk={handleConfirm}
+      destroyOnClose
+    >
+      <Form form={form} layout="vertical" style={{ marginBottom: 12 }}>
+        <Form.Item
+          name="warehouseId"
+          label="目标仓库"
+          rules={[{ required: true, message: '请选择目标仓库' }]}
+          style={{ marginBottom: 12 }}
+        >
+          <Select
+            placeholder="请选择要调整库存的仓库"
+            loading={warehouseLoading}
+            options={warehouseOptions}
+            showSearch
+            optionFilterProp="label"
+            allowClear={false}
+          />
+        </Form.Item>
+      </Form>
+      <p style={{ margin: '0 0 12px', color: '#64748b', fontSize: 13 }}>
+        修改"盘点后库存"列的数值，库存发生变化的行将在确认后提交。橙色高亮表示已修改。
+      </p>
+      <Table
+        size="small"
+        rowKey="id"
+        dataSource={editRows}
+        columns={columns}
+        pagination={false}
+        scroll={{ y: 400 }}
+        locale={{ emptyText: '无已选产品' }}
+        rowClassName={(r) => r.newStock !== r.currentStock ? 'ant-table-row-highlighted' : ''}
+      />
+    </Modal>
+  );
+}

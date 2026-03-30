@@ -15,16 +15,16 @@ import AlibabaSettings from './AlibabaSettings';
 import ShopAuth from './ShopAuth';
 import PlatformProducts from './PlatformProducts';
 import PlatformOrders from './PlatformOrders';
+import FbeShipments from './FbeShipments';
+import WarehouseList from './WarehouseList';
 import SyncStatusBar from '../components/SyncStatusBar';
+import { ALL_MENU_ITEMS, type AppMenuItem } from '../lib/menuConfig';
 import {
   Layout, Menu, Avatar, Dropdown, Tag, Badge,
   Typography, Space, Button, Statistic, DatePicker, Spin, Select, Alert, message,
 } from 'antd';
 import {
-  DashboardOutlined,
   TeamOutlined,
-  GlobalOutlined,
-  StarOutlined,
   LogoutOutlined,
   UserOutlined,
   RiseOutlined,
@@ -32,16 +32,7 @@ import {
   BellOutlined,
   ClockCircleOutlined,
   DownOutlined,
-  FileTextOutlined,
   SettingOutlined,
-  BulbOutlined,
-  DatabaseOutlined,
-  ApiOutlined,
-  ShopOutlined,
-  AppstoreOutlined,
-  BarChartOutlined,
-  ShoppingOutlined,
-  SafetyCertificateOutlined,
 } from '@ant-design/icons';
 import {
   ResponsiveContainer,
@@ -86,69 +77,6 @@ function getStoredUser() {
     return null;
   }
 }
-
-// ── 菜单项类型（扩展了 code 字段用于权限过滤） ────────────────
-interface AppMenuItem {
-  key:       string;
-  icon?:     React.ReactNode;
-  label:     string;
-  code?:     string;           // 权限码，undefined = 无需权限（始终可见）
-  children?: AppMenuItem[];
-}
-
-// ── 全量菜单配置（含权限码） ───────────────────────────────────
-// code 对应后端 Permission 表的 code 字段，由后端通过 GET /permissions/tree 定义。
-// 父级分组节点不设 code，子节点全部被过滤后父节点自动隐藏。
-// ── 全量菜单配置（code 与后端 Permission 表 code 字段严格对齐） ─
-const ALL_MENU_ITEMS: AppMenuItem[] = [
-  { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' }, // 始终可见，无需权限码
-  {
-    key: 'product-dev',
-    icon: <BulbOutlined />,
-    label: '产品开发',
-    children: [
-      { key: 'pool',          icon: <GlobalOutlined />,   label: '公海产品', code: 'MENU_PUBLIC_PRODUCTS' },
-      { key: 'private-pool',  icon: <StarOutlined />,     label: '意向产品', code: 'MENU_INTENT_PRODUCTS'  },
-      { key: 'inventory-sku', icon: <DatabaseOutlined />, label: '库存 SKU', code: 'MENU_INVENTORY'         },
-    ],
-  },
-  {
-    key: 'platform-data',
-    icon: <BarChartOutlined />,
-    label: '平台数据',
-    children: [
-      { key: 'platform-products', icon: <AppstoreOutlined />, label: '平台产品', code: 'MENU_PLATFORM_PRODUCTS' },
-      { key: 'platform-orders',   icon: <ShoppingOutlined />, label: '平台订单', code: 'MENU_PLATFORM_ORDERS'   },
-    ],
-  },
-  {
-    key: 'supply-chain',
-    icon: <ShoppingCartOutlined />,
-    label: '供应采购',
-    children: [
-      { key: 'sc-planning',   icon: <FileTextOutlined />, label: '采购计划', code: 'MENU_PURCHASE_PLAN'    },
-      { key: 'sc-management', icon: <SettingOutlined />,  label: '采购管理', code: 'MENU_PURCHASE_MANAGE'  },
-    ],
-  },
-  {
-    key: 'user-center',
-    icon: <TeamOutlined />,
-    label: '用户管理',
-    children: [
-      { key: 'users', icon: <UserOutlined />,              label: '分配账号', code: 'MENU_ASSIGN_ACCOUNT' },
-      { key: 'roles', icon: <SafetyCertificateOutlined />, label: '角色管理', code: 'MENU_ROLE_MANAGE'    },
-    ],
-  },
-  {
-    key: 'sys-settings',
-    icon: <SettingOutlined />,
-    label: '系统设置',
-    children: [
-      { key: 'shop-auth',        icon: <ShopOutlined />, label: '店铺授权',  code: 'MENU_SHOP_AUTH'    },
-      { key: 'alibaba-settings', icon: <ApiOutlined />,  label: '1688 配置', code: 'MENU_1688_CONFIG'   },
-    ],
-  },
-];
 
 // ── 权限过滤：递归保留有权访问的菜单节点 ─────────────────────
 // permissions === null → 超管或老会话，返回全量
@@ -204,12 +132,14 @@ const menuLabelMap: Record<string, string> = {
   'inventory-sku':     '产品开发 / 库存 SKU',
   'platform-products': '平台数据 / 平台产品',
   'platform-orders':   '平台数据 / 平台订单',
+  'fbe-shipments':     '平台数据 / FBE发货',
   'sc-planning':       '供应采购 / 采购计划',
   'sc-management':     '供应采购 / 采购管理',
   'users':             '用户管理 / 分配账号',
   'roles':             '用户管理 / 角色管理',
   'shop-auth':         '系统设置 / 店铺授权',
   'alibaba-settings':  '系统设置 / 1688 配置',
+  'warehouse-list':    '产品开发 / 仓库列表',
 };
 
 // ── 店铺选项（用于仪表盘筛选）─────────────────────────────────
@@ -860,8 +790,14 @@ export default function Dashboard() {
           {/* 平台数据 - 平台订单 */}
           {activeKey === 'platform-orders' && <PlatformOrders />}
 
+          {/* 平台数据 - FBE发货 */}
+          {activeKey === 'fbe-shipments' && <FbeShipments />}
+
           {/* 我的私有产品库 */}
           {activeKey === 'private-pool' && <PrivatePool onNavigate={(key) => setActiveKey(key)} />}
+
+          {/* 产品开发 — 仓库列表 */}
+          {activeKey === 'warehouse-list' && <WarehouseList />}
 
           {/* 库存 SKU */}
           {activeKey === 'inventory-sku' && (

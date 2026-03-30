@@ -1,14 +1,14 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Button, Tooltip, message, Empty, Image, Typography, Space, Modal,
-  InputNumber, Input, Divider, Select, Spin, Dropdown,
+  InputNumber, Input, Divider, Dropdown, Form, Select, Spin,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import type { MenuProps } from 'antd';
 import {
   SearchOutlined, ShoppingOutlined, ReloadOutlined, LinkOutlined,
   FileTextOutlined, FileDoneOutlined, ToolOutlined, DownOutlined,
-  ExclamationCircleFilled, RollbackOutlined, EnvironmentOutlined,
+  ExclamationCircleFilled, RollbackOutlined,
   DownloadOutlined, DeleteOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
@@ -53,6 +53,8 @@ export default function ProcurementPlanning() {
   const [orderModalOpen,  setOrderModalOpen]  = useState(false);
   const [removing,        setRemoving]        = useState(false);
   const [mappingTarget,   setMappingTarget]   = useState<PurchasingProduct | null>(null);
+  // 内联数量编辑：key = product.id，value = 当前输入框的值（未保存）
+  const [editingQty,      setEditingQty]      = useState<Record<number, number | null>>({});
 
   const fetchProducts = useCallback(async (p: number, ps: number) => {
     setLoading(true);
@@ -94,14 +96,14 @@ export default function ProcurementPlanning() {
       onOk: async () => {
         setRemoving(true);
         try {
-          const { data: res } = await request.put<{ code: number; message: string; data: { count: number } }>(
+          const { data: res } = await request.post<{ code: number; message: string; data: { count: number } }>(
             '/products/batch-discard', { ids },
           );
           if (res.code === 200) {
-            message.success(res.message || '操作成功');
-            setSelectedRowKeys([]);
+            message.success('已成功移出采购计划');
+            setSelectedRowKeys([]);   // 清空僵尸选中 ID
             setSelectedRows([]);
-            fetchProducts(page, pageSize);
+            fetchProducts(page, pageSize);   // 立刻刷新，让产品视觉消失
           } else {
             message.error(res.message || '操作失败');
           }
@@ -113,6 +115,59 @@ export default function ProcurementPlanning() {
       },
     });
   }, [selectedRowKeys, selectedRows, page, pageSize, fetchProducts]);
+
+  // ── 内联数量保存（onBlur 触发）───────────────────────────────
+  const handleQuantityBlur = useCallback(async (id: number) => {
+    const newQty = editingQty[id];
+    // 未修改或值非法则跳过
+    if (newQty == null || newQty < 1) return;
+    const orig = products.find((p) => p.id === id);
+    if (orig && orig.purchaseQuantity === newQty) return;
+    try {
+      const { data: res } = await request.put<{ code: number; message: string }>(
+        '/products/batch-update',
+        { items: [{ id, purchaseQuantity: newQty }] },
+      );
+      if (res.code === 200) {
+        // 原地更新本地 products，避免整页刷新
+        setProducts((prev) => prev.map((p) => p.id === id ? { ...p, purchaseQuantity: newQty } : p));
+        // 清除编辑态
+        setEditingQty((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      } else {
+        message.error(res.message || '数量保存失败');
+      }
+    } catch {
+      message.error('数量保存失败，请检查网络');
+    }
+  }, [editingQty, products]);
+
+  // ── 单行移除（复用 batch-discard，ids 包装为单元素数组）────────
+  const handleRemoveFromPlan = useCallback((id: number) => {
+    Modal.confirm({
+      title: '确认移除',
+      icon: <ExclamationCircleFilled style={{ color: '#ff4d4f' }} />,
+      content: '将此产品从采购计划中移除？移除后需重新加入才能下单。',
+      okText: '移除',
+      okType: 'danger',
+      cancelText: '取消',
+      async onOk() {
+        try {
+          const { data: res } = await request.post<{ code: number; message: string }>(
+            '/products/batch-discard',
+            { ids: [id] },
+          );
+          if (res.code === 200) {
+            message.success('已成功移出采购计划');
+            fetchProducts(page, pageSize);
+          } else {
+            message.error(res.message || '移除失败');
+          }
+        } catch {
+          message.error('移除失败，请检查网络');
+        }
+      },
+    });
+  }, [fetchProducts, page, pageSize]);
 
   // ── 批量下载 CSV（纯前端）────────────────────────────────────
   const handleBatchDownload = useCallback(() => {
@@ -240,10 +295,19 @@ export default function ProcurementPlanning() {
         : <span className="text-gray-300">—</span>,
     },
     {
-      title: '采购数量', dataIndex: 'purchaseQuantity', width: 100, align: 'center',
-      render: (v: number | null) => v != null
-        ? <span className="tabular-nums font-medium">{v}</span>
-        : <span className="text-gray-300">—</span>,
+      title: '采购数量', dataIndex: 'purchaseQuantity', width: 120, align: 'center',
+      render: (_: unknown, record: PurchasingProduct) => (
+        <InputNumber
+          size="small"
+          min={1}
+          precision={0}
+          style={{ width: 90 }}
+          value={editingQty[record.id] ?? record.purchaseQuantity ?? undefined}
+          onChange={(v) => setEditingQty((prev) => ({ ...prev, [record.id]: v }))}
+          onBlur={() => handleQuantityBlur(record.id)}
+          onPressEnter={() => handleQuantityBlur(record.id)}
+        />
+      ),
     },
     {
       title: '采购总金额', key: 'totalAmount', width: 130, align: 'right',
@@ -286,7 +350,21 @@ export default function ProcurementPlanning() {
         );
       },
     },
-  ], []);
+    {
+      title: '操作', key: 'actions', width: 80, align: 'center', fixed: 'right' as const,
+      render: (_: unknown, record: PurchasingProduct) => (
+        <Button
+          type="link"
+          size="small"
+          danger
+          style={{ padding: 0, fontSize: 12 }}
+          onClick={() => handleRemoveFromPlan(record.id)}
+        >
+          移除
+        </Button>
+      ),
+    },
+  ], [editingQty, handleQuantityBlur, handleRemoveFromPlan]);
 
   return (
     <div className="min-h-full">
@@ -320,10 +398,10 @@ export default function ProcurementPlanning() {
         </Dropdown>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100">
         <Table
           rowKey="id" dataSource={products} columns={columns} loading={loading}
-          scroll={{ x: 1200 }} size="large" onChange={handlePageChange}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 270px)' }} size="large" onChange={handlePageChange}
           rowSelection={{
             selectedRowKeys,
             onChange: (keys, rows) => { setSelectedRowKeys(keys); setSelectedRows(rows); },
@@ -340,9 +418,12 @@ export default function ProcurementPlanning() {
         onCancel={() => setOrderModalOpen(false)}
         onSuccess={() => {
           setOrderModalOpen(false);
+          // 清空选中状态，防止旧选中项污染下次操作
           setSelectedRowKeys([]);
           setSelectedRows([]);
-          fetchProducts(page, pageSize);
+          // 强制回第 1 页刷新，确保后端新过滤逻辑生效后产品立即从列表消失
+          setPage(1);
+          fetchProducts(1, pageSize);
         }}
       />
 
@@ -587,85 +668,70 @@ interface OrderConfirmModalProps {
   onSuccess: () => void;
 }
 
-interface AliAddress {
-  addressId: string;
-  fullName: string;
-  mobile: string;
-  provinceText: string;
-  cityText: string;
-  areaText: string;
-  townText: string;
-  address: string;
-  isDefault: boolean;
-}
-
-// 弹窗内可编辑行（只需要 id + purchaseQuantity 用于实时计算和提交）
+// 弹窗内可编辑行
 interface OrderEditRow {
   id:               number;
   purchaseQuantity: number;
 }
 
-function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [alibabaResult, setAlibabaResult] = useState<{ success: boolean; aliOrderId?: string; errorMessage?: string } | null>(null);
+interface WarehouseOption { id: number; name: string; }
 
-  // ── 内部可编辑数量副本 ─────────────────────────────────────
-  const [editData, setEditData] = useState<OrderEditRow[]>([]);
+function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModalProps) {
+  const [submitting,   setSubmitting]   = useState(false);
+  const [editData,     setEditData]     = useState<OrderEditRow[]>([]);
+  const [warehouseId,  setWarehouseId]  = useState<number | undefined>(undefined);
+  const [warehouses,   setWarehouses]   = useState<WarehouseOption[]>([]);
+  const [whLoading,    setWhLoading]    = useState(false);
 
   useEffect(() => {
-    if (open) {
-      setEditData(rows.map((r) => ({
-        id:               r.id,
-        purchaseQuantity: r.purchaseQuantity ?? 1,
-      })));
-      setAlibabaResult(null);
-    }
+    if (!open) return;
+    setEditData(rows.map((r) => ({
+      id:               r.id,
+      purchaseQuantity: r.purchaseQuantity ?? 1,
+    })));
+    setWarehouseId(undefined);
+
+    // 拉取仓库列表
+    setWhLoading(true);
+    request.get<{ code: number; data: WarehouseOption[] | { list: WarehouseOption[] } }>(
+      '/warehouses',
+    ).then(({ data: res }) => {
+      if (res.code === 200) {
+        const list = Array.isArray(res.data)
+          ? res.data
+          : Array.isArray((res.data as { list: WarehouseOption[] }).list)
+            ? (res.data as { list: WarehouseOption[] }).list
+            : [];
+        setWarehouses(list);
+        // 仅一个仓库时自动选中
+        if (list.length === 1) setWarehouseId(list[0].id);
+      }
+    }).catch(() => { /* silent */ })
+      .finally(() => setWhLoading(false));
   }, [open, rows]);
 
   const updateQuantity = useCallback((id: number, val: number | null) => {
     setEditData((prev) => prev.map((r) => r.id === id ? { ...r, purchaseQuantity: val ?? 1 } : r));
   }, []);
 
-  // 根据 editData 实时计算总价
-  const quantityMap = useMemo(() =>
-    Object.fromEntries(editData.map((r) => [r.id, r.purchaseQuantity])),
+  const quantityMap = useMemo(
+    () => Object.fromEntries(editData.map((r) => [r.id, r.purchaseQuantity])),
     [editData],
   );
-
-  const [addresses, setAddresses] = useState<AliAddress[]>([]);
-  const [addrLoading, setAddrLoading] = useState(false);
-  const [selectedAddrId, setSelectedAddrId] = useState<string | undefined>(undefined);
-
-  const linkedRows = useMemo(() => rows.filter((r) => r.externalProductId), [rows]);
 
   const grandTotal = useMemo(
     () => rows.reduce((sum, r) => sum + (r.purchasePrice ?? 0) * (quantityMap[r.id] ?? r.purchaseQuantity ?? 0), 0),
     [rows, quantityMap],
   );
 
-  useEffect(() => {
-    if (!open || linkedRows.length === 0) return;
-    setAddrLoading(true);
-    request.get<{ code: number; data: AliAddress[] }>('/alibaba/addresses')
-      .then(({ data: res }) => {
-        const list = Array.isArray(res.data) ? res.data : [];
-        setAddresses(list);
-        const defaultAddr = list.find((a) => a.isDefault) ?? list[0];
-        if (defaultAddr) setSelectedAddrId(defaultAddr.addressId);
-      })
-      .catch(() => { setAddresses([]); })
-      .finally(() => setAddrLoading(false));
-  }, [open, linkedRows.length]);
-
   const handleConfirm = async () => {
-    if (linkedRows.length > 0 && !selectedAddrId) {
-      message.warning('请先选择收货地址');
+    if (!warehouseId) {
+      message.error('请先选择入库目标仓库！');
       return;
     }
     setSubmitting(true);
-    setAlibabaResult(null);
     try {
-      // ── Step 1：先将修改后的数量持久化到数据库 ──────────────
+      // ── Step 1：将修改过的数量持久化到数据库 ─────────────────
       const changedItems = editData
         .map((ed) => {
           const orig = rows.find((r) => r.id === ed.id);
@@ -685,94 +751,29 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
         }
       }
 
-      // ── Step 2：创建本地采购单 ────────────────────────────────
-      const { data: res } = await request.post<{ code: number; message: string; data: { orderNo: string } }>('/orders', {
-        productIds: rows.map((r) => r.id),
+      // ── Step 2：创建本地采购单，携带 warehouseId ────────────
+      const { data: res } = await request.post<{
+        code: number; message: string; data: { orderNo?: string; count?: number };
+      }>('/purchases/create-local', {
+        warehouseId,
+        items: editData.map((r) => ({
+          productId: r.id,
+          quantity:  r.purchaseQuantity,
+        })),
       });
-      if (res.code !== 200) { message.error(res.message); return; }
+      if (res.code !== 200) { message.error(res.message || '创建采购单失败'); return; }
 
-      message.success(`${res.message}（单号：${res.data?.orderNo}）`);
+      const hint = res.data?.orderNo
+        ? `（单号：${res.data.orderNo}）`
+        : res.data?.count != null ? `（共生成 ${res.data.count} 张采购单）` : '';
+      message.success(`${res.message || '采购单创建成功！'}${hint}`);
 
-      if (linkedRows.length > 0) {
-        try {
-          const { data: aliRes } = await request.post<{
-            code: number; message: string;
-            data: { success: boolean; aliOrderId?: string; errorCode?: string; errorMessage?: string; rawError?: string; syncedCount?: number; debug_payload?: unknown };
-          }>('/alibaba/create-order', {
-            productIds: linkedRows.map((r) => r.id),
-            addressId: selectedAddrId,
-          });
-
-          if (aliRes.code === 200 && aliRes.data?.success) {
-            setAlibabaResult({ success: true, aliOrderId: aliRes.data.aliOrderId });
-            message.success(`1688 下单成功！订单号: ${aliRes.data.aliOrderId}`);
-          } else {
-            const errCode = aliRes.data?.errorCode ?? '';
-            const errMsg = aliRes.data?.errorMessage ?? aliRes.message ?? '';
-            const rawErr = aliRes.data?.rawError ?? '';
-            const debugPayload = aliRes.data?.debug_payload;
-
-            let displayMsg = errMsg || '1688 返回了未知错误';
-            if (errCode) displayMsg = `[${errCode}] ${displayMsg}`;
-
-            const knownErrors: Record<string, string> = {
-              'NO_TOKEN':        '1688 授权已过期，请到「系统设置 → 1688 配置」重新绑定账号',
-              'NO_ADDRESS':      '未选择收货地址，请在下单弹窗中选择收货地址',
-              'OFFER_NOT_EXIST': '商品不存在或已下架，请核实 1688 关联的商品信息',
-            };
-            const friendlyMsg = knownErrors[errCode] ?? displayMsg;
-
-            setAlibabaResult({ success: false, errorMessage: friendlyMsg });
-            Modal.error({
-              title: '1688 下单失败',
-              width: 560,
-              content: (
-                <div>
-                  <p style={{ fontSize: 14, marginBottom: 8 }}>{friendlyMsg}</p>
-                  {debugPayload != null && (
-                    <details open style={{ fontSize: 12, marginBottom: rawErr ? 8 : 0 }}>
-                      <summary style={{ cursor: 'pointer', marginBottom: 4, fontWeight: 600, color: '#d4380d' }}>🔍 查看发往 1688 的完整 Payload（排雷用）</summary>
-                      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 280, overflow: 'auto', background: '#fff7e6', padding: 10, borderRadius: 6, fontSize: 11, border: '1px solid #ffd591' }}>{JSON.stringify(debugPayload, null, 2)}</pre>
-                    </details>
-                  )}
-                  {rawErr && (
-                    <details style={{ fontSize: 12, color: '#8c8c8c' }}>
-                      <summary style={{ cursor: 'pointer', marginBottom: 4 }}>查看 1688 原始返回</summary>
-                      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 200, overflow: 'auto', background: '#f5f5f5', padding: 8, borderRadius: 6, fontSize: 11 }}>{rawErr}</pre>
-                    </details>
-                  )}
-                </div>
-              ),
-              okText: '知道了',
-            });
-          }
-        } catch (err: unknown) {
-          const axiosData = (err as { response?: { data?: { message?: string; debug_payload?: unknown } } })?.response?.data;
-          const errMsg = axiosData?.message ?? (err instanceof Error ? err.message : '网络异常');
-          const debugPayload = axiosData?.debug_payload;
-          setAlibabaResult({ success: false, errorMessage: errMsg });
-          Modal.error({
-            title: '1688 下单请求失败',
-            width: 560,
-            content: (
-              <div>
-                <p style={{ fontSize: 14, marginBottom: 8 }}>本地采购单已创建成功，但同步 1688 下单时出错：{errMsg}</p>
-                {debugPayload != null && (
-                  <details open style={{ fontSize: 12, marginTop: 12 }}>
-                    <summary style={{ cursor: 'pointer', marginBottom: 4, fontWeight: 600, color: '#d4380d' }}>🔍 查看发往 1688 的完整 Payload（排雷用）</summary>
-                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 280, overflow: 'auto', background: '#fff7e6', padding: 10, borderRadius: 6, fontSize: 11, border: '1px solid #ffd591' }}>{JSON.stringify(debugPayload, null, 2)}</pre>
-                  </details>
-                )}
-              </div>
-            ),
-            okText: '知道了',
-          });
-        }
-      }
-
-      onSuccess();
-    } catch { message.error('创建采购单失败'); }
-    finally { setSubmitting(false); }
+      onSuccess();  // 触发父组件刷新列表，已流转产品自动消失
+    } catch {
+      message.error('创建采购单失败，请检查网络后重试');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const orderColumns = useMemo<ColumnsType<PurchasingProduct>>(() => [
@@ -831,13 +832,6 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
           : <span className="text-gray-300">—</span>;
       },
     },
-    {
-      title: '1688 同步', key: 'alibaba', width: 80, align: 'center',
-      render: (_: unknown, record: PurchasingProduct) =>
-        record.externalProductId
-          ? <Tag color="orange" bordered={false} style={{ borderRadius: 6, fontWeight: 600, fontSize: 11 }}>将下单</Tag>
-          : <span style={{ color: '#d9d9d9', fontSize: 12 }}>—</span>,
-    },
   ], [quantityMap, updateQuantity]);
 
   return (
@@ -845,15 +839,20 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
       title={<span><FileDoneOutlined style={{ marginRight: 8, color: '#1890ff' }} />核对并创建采购单</span>}
       open={open}
       onCancel={onCancel}
-      width={820}
+      width={800}
       destroyOnClose
       maskClosable={false}
       footer={[
         <Button key="cancel" onClick={onCancel}>取消</Button>,
-        <Button key="confirm" type="primary" loading={submitting} onClick={handleConfirm}
-          style={{ background: '#52c41a', borderColor: '#52c41a' }}
+        <Button
+          key="confirm"
+          type="primary"
+          loading={submitting}
+          disabled={!warehouseId}
+          onClick={handleConfirm}
+          style={warehouseId ? { background: '#52c41a', borderColor: '#52c41a' } : {}}
         >
-          确认下单
+          确认创建采购单
         </Button>,
       ]}
     >
@@ -863,75 +862,50 @@ function OrderConfirmModal({ open, rows, onCancel, onSuccess }: OrderConfirmModa
         columns={orderColumns}
         pagination={false}
         size="small"
-        scroll={{ y: 320 }}
+        scroll={{ y: 300 }}
         style={{ marginBottom: 16 }}
       />
 
-      {linkedRows.length > 0 && (
-        <div style={{
-          background: '#fff7e6', border: '1px solid #ffe7ba', borderRadius: 10,
-          padding: '12px 16px', marginBottom: 12,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-            <EnvironmentOutlined style={{ color: '#fa8c16', fontSize: 16 }} />
-            <span style={{ fontWeight: 600, fontSize: 14, color: '#874d00' }}>收货地址</span>
-            {addrLoading && <Spin size="small" />}
-          </div>
-          {addresses.length > 0 ? (
+      {/* 仓库选择（必填防呆） */}
+      <Form layout="vertical" style={{ marginBottom: 12 }}>
+        <Form.Item
+          label={
+            <span style={{ fontWeight: 600, fontSize: 13 }}>
+              📦 入库目标仓库
+              <span style={{ color: '#ff4d4f', marginLeft: 4 }}>*</span>
+            </span>
+          }
+          style={{ marginBottom: 0 }}
+          validateStatus={!warehouseId ? 'warning' : 'success'}
+          help={!warehouseId ? '请务必选择入库目标仓库，否则无法创建采购单' : undefined}
+        >
+          {whLoading ? (
+            <div style={{ padding: '8px 0' }}><Spin size="small" /><span style={{ marginLeft: 8, color: '#9ca3af', fontSize: 12 }}>加载仓库列表…</span></div>
+          ) : (
             <Select
+              placeholder="请务必选择入库目标仓库"
+              value={warehouseId}
+              onChange={setWarehouseId}
               style={{ width: '100%' }}
-              value={selectedAddrId}
-              onChange={setSelectedAddrId}
-              placeholder="请选择收货地址"
-              optionLabelProp="label"
-              loading={addrLoading}
-            >
-              {addresses.map((a) => (
-                <Select.Option
-                  key={a.addressId}
-                  value={a.addressId}
-                  label={`${a.fullName} — ${a.provinceText}${a.cityText}${a.areaText}${a.address}`}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <span style={{ fontWeight: 600 }}>{a.fullName}</span>
-                      <span style={{ color: '#8c8c8c', marginLeft: 8, fontSize: 12 }}>{a.mobile}</span>
-                      <span style={{ color: '#595959', marginLeft: 12, fontSize: 13 }}>
-                        {a.provinceText}{a.cityText}{a.areaText}{a.townText}{a.address}
-                      </span>
-                    </div>
-                    {a.isDefault && <Tag color="blue" bordered={false} style={{ borderRadius: 4, fontSize: 11 }}>默认</Tag>}
-                  </div>
-                </Select.Option>
-              ))}
-            </Select>
-          ) : !addrLoading ? (
-            <span style={{ color: '#bfbfbf', fontSize: 13 }}>未获取到 1688 收货地址，将使用系统默认地址</span>
-          ) : null}
-        </div>
-      )}
+              size="large"
+              options={warehouses.map((w) => ({ value: w.id, label: w.name }))}
+              allowClear
+            />
+          )}
+        </Form.Item>
+      </Form>
 
+      {/* 汇总栏 */}
       <div style={{
         background: '#f6f8fa', borderRadius: 10, padding: '14px 20px',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8,
       }}>
-        <div style={{ fontSize: 12, color: '#8c8c8c' }}>
-          {linkedRows.length > 0 ? (
-            <Tag color="orange" bordered={false} style={{ borderRadius: 6 }}>
-              🔗 {linkedRows.length} 个已关联 1688，下单后将自动同步到 1688
-            </Tag>
-          ) : (
-            <span style={{ color: '#bfbfbf' }}>无已关联 1688 的产品，仅创建本地采购单</span>
-          )}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-          <span style={{ fontSize: 14, color: '#595959' }}>
-            本次共采购 <b style={{ color: '#1e293b', fontSize: 16 }}>{rows.length}</b> 款产品，总计金额：
-          </span>
-          <span style={{ fontSize: 22, fontWeight: 700, color: '#d4380d', fontFeatureSettings: '"tnum"' }}>
-            ¥{grandTotal.toFixed(2)}
-          </span>
-        </div>
+        <span style={{ fontSize: 14, color: '#595959' }}>
+          共 <b style={{ color: '#1e293b', fontSize: 16 }}>{rows.length}</b> 款产品，总金额：
+        </span>
+        <span style={{ fontSize: 22, fontWeight: 700, color: '#d4380d', fontFeatureSettings: '"tnum"' }}>
+          ¥{grandTotal.toFixed(2)}
+        </span>
       </div>
     </Modal>
   );

@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import request from '../lib/request';
+import { ALL_MENU_ITEMS, buildPermissionTree, collectGroupKeys } from '../lib/menuConfig';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -23,13 +24,6 @@ interface Role {
   description: string | null;
   userCount?:  number;
   createdAt:   string;
-}
-
-interface PermissionNode {
-  id:        number;
-  name:      string;
-  code?:     string;
-  children?: PermissionNode[];
 }
 
 // ─── 主组件 ──────────────────────────────────────────────────
@@ -328,16 +322,15 @@ export default function RoleManagement() {
   );
 }
 
-// ─── 工具：将后端权限节点转成 Ant Design Tree 所需的 DataNode ──
+// ─── 工具：将 PermTreeNode[] 转为 Ant Design Tree 的 DataNode[] ──
+// PermTreeNode 的 key 已经是 string（code 或 group:xxx），直接透传。
+import type { PermTreeNode } from '../lib/menuConfig';
 
-function toTreeData(nodes: PermissionNode[]): DataNode[] {
-  if (!Array.isArray(nodes)) return [];
+function toAntTreeData(nodes: PermTreeNode[]): DataNode[] {
   return nodes.map((n) => ({
-    key:      n.id,
-    title:    n.name,
-    children: Array.isArray(n.children) && n.children.length > 0
-      ? toTreeData(n.children)
-      : undefined,
+    key:      n.key,
+    title:    n.title,
+    children: n.children ? toAntTreeData(n.children) : undefined,
   }));
 }
 
@@ -351,76 +344,79 @@ interface PermissionDrawerProps {
 }
 
 function PermissionDrawer({ open, role, onClose, onSaved }: PermissionDrawerProps) {
-  const [treeData,        setTreeData]        = useState<DataNode[]>([]);
+  // ── 权限树：从前端菜单配置动态生成，无需请求后端 ─────────────
+  // 每次菜单配置新增页面，这里自动同步，无需任何手工维护。
+  const permTree     = useMemo(() => buildPermissionTree(ALL_MENU_ITEMS), []);
+  const treeData     = useMemo(() => toAntTreeData(permTree), [permTree]);
+  const groupKeys    = useMemo(() => collectGroupKeys(permTree), [permTree]);
+  const expandedInit = useMemo(() => treeData.map((n) => n.key), [treeData]);
+
   const [checkedKeys,     setCheckedKeys]     = useState<Key[]>([]);
   const [halfCheckedKeys, setHalfCheckedKeys] = useState<Key[]>([]);
-  const [expandedKeys,    setExpandedKeys]    = useState<Key[]>([]);
-  const [loadingTree,     setLoadingTree]     = useState(false);
+  const [expandedKeys,    setExpandedKeys]    = useState<Key[]>(expandedInit);
+  const [loadingRole,     setLoadingRole]     = useState(false);
   const [saving,          setSaving]          = useState(false);
   const [loadError,       setLoadError]       = useState<string | null>(null);
 
-  // 每次打开时重新加载全量权限树 + 当前角色已有权限
+  // 每次打开时，仅拉取当前角色已有权限码并回显
   useEffect(() => {
     if (!open || !role) return;
     let cancelled = false;
     setLoadError(null);
-    setLoadingTree(true);
+    setLoadingRole(true);
+    setCheckedKeys([]);
+    setHalfCheckedKeys([]);
+    setExpandedKeys(expandedInit);
 
-    (async () => {
-      try {
-        // 并发请求：全量权限树 + 角色当前权限
-        const [treeRes, roleRes] = await Promise.all([
-          request.get<{ code: number; data?: PermissionNode[]; message?: string }>('/permissions/tree'),
-          request.get<{
-            code: number;
-            data?: {
-              permissions?: { id: number }[];
-              permissionIds?: number[];
-            };
-            message?: string;
-          }>(`/roles/${role.id}`),
-        ]);
-
+    request.get<{
+      code: number;
+      data?: {
+        permissionCodes?: string[];
+        codes?: string[];
+        permissions?: { code?: string; name?: string; id?: number }[];
+        role?: { permissions?: { code?: string; name?: string }[] };
+      };
+      message?: string;
+    }>(`/roles/${role.id}`)
+      .then(({ data: res }) => {
         if (cancelled) return;
-
-        // ① 渲染权限树
-        if (treeRes.data.code === 200 && Array.isArray(treeRes.data.data)) {
-          const nodes = toTreeData(treeRes.data.data);
-          setTreeData(nodes);
-          setExpandedKeys(nodes.map((n) => n.key));
-        } else {
-          setLoadError(treeRes.data.message ?? '权限树加载失败');
+        if (res.code !== 200) {
+          message.warning(res.message ?? '无法获取当前角色权限，已默认全部不选');
           return;
         }
+        const d = res.data;
+        let existingCodes: string[] = [];
 
-        // ② 回显角色已有权限
-        //    URL: GET /api/roles/:id  （baseURL=/api，路径 /roles/${role.id}）
-        //    兼容后端两种返回格式：permissionIds: number[]  或  permissions: {id}[]
-        //    强制转 Number()，防止后端返回字符串 ID 导致树 key 类型不匹配而勾选失效
-        if (roleRes.data.code !== 200) {
-          message.warning(roleRes.data.message ?? '无法获取当前角色权限，已默认全部不选');
-          setCheckedKeys([]);
-          setHalfCheckedKeys([]);
-          return;
+        if (Array.isArray(d?.permissionCodes)) {
+          // 格式 1：{ permissionCodes: string[] }（推荐，与 PUT 提交字段对齐）
+          existingCodes = d.permissionCodes.filter(Boolean);
+        } else if (Array.isArray(d?.codes)) {
+          // 格式 2：{ codes: string[] }
+          existingCodes = d.codes.filter(Boolean);
+        } else if (Array.isArray(d?.permissions)) {
+          // 格式 3：{ permissions: [{ code, name }] }
+          existingCodes = (d.permissions as { code?: string; name?: string }[])
+            .map((p) => p.code ?? p.name ?? '')
+            .filter(Boolean);
+        } else if (Array.isArray(d?.role?.permissions)) {
+          // 格式 4：{ role: { permissions: [{ code }] } }
+          existingCodes = (d.role!.permissions as { code?: string; name?: string }[])
+            .map((p) => p.code ?? p.name ?? '')
+            .filter(Boolean);
         }
-        const roleData = roleRes.data.data;
-        let existingIds: number[] = [];
-        if (Array.isArray(roleData?.permissionIds)) {
-          existingIds = roleData.permissionIds.map(Number);
-        } else if (Array.isArray(roleData?.permissions)) {
-          existingIds = roleData.permissions.map((p) => Number(p.id));
-        }
-        setCheckedKeys(existingIds);
-        setHalfCheckedKeys([]);
-      } catch {
+
+        // 只勾选叶子节点（排除分组 key），分组的半选状态由 Tree 自动推导
+        setCheckedKeys(existingCodes.filter((c) => !groupKeys.includes(c)));
+      })
+      .catch(() => {
         if (!cancelled) setLoadError('请求失败，请检查网络或后端服务');
-      } finally {
-        if (!cancelled) setLoadingTree(false);
-      }
-    })();
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingRole(false);
+      });
 
     return () => { cancelled = true; };
-  }, [open, role]);
+  }, [open, role, expandedInit, groupKeys]);
 
   const handleCheck = useCallback(
     (keys: Key[] | { checked: Key[]; halfChecked: Key[] }, info: { halfCheckedKeys?: Key[] }) => {
@@ -438,10 +434,13 @@ function PermissionDrawer({ open, role, onClose, onSaved }: PermissionDrawerProp
     if (!role) return;
     setSaving(true);
     try {
-      const permissionIds = [...new Set([...checkedKeys, ...halfCheckedKeys])].map(Number);
+      // 只提交叶子节点的 code（过滤掉 group:xxx 分组 key），payload 键名用 permissionCodes
+      const allSelected = [...new Set([...checkedKeys, ...halfCheckedKeys])] as string[];
+      const permissionCodes = allSelected.filter((k) => !groupKeys.includes(k as string));
+
       const { data: res } = await request.put<{ code: number; message: string }>(
         `/roles/${role.id}/permissions`,
-        { permissionIds },
+        { permissionCodes },   // ← 改为 permissionCodes，与后端字段名对齐
       );
       if (res.code === 200) {
         message.success(`角色「${role.name}」权限已更新`);
@@ -454,9 +453,9 @@ function PermissionDrawer({ open, role, onClose, onSaved }: PermissionDrawerProp
     } finally {
       setSaving(false);
     }
-  }, [role, checkedKeys, halfCheckedKeys, onSaved]);
+  }, [role, checkedKeys, halfCheckedKeys, groupKeys, onSaved]);
 
-  const checkedCount = checkedKeys.length + halfCheckedKeys.length;
+  const checkedCount = checkedKeys.length;
 
   return (
     <Drawer
@@ -487,7 +486,7 @@ function PermissionDrawer({ open, role, onClose, onSaved }: PermissionDrawerProp
             <Button
               type="primary"
               loading={saving}
-              disabled={loadingTree || !!loadError}
+              disabled={loadingRole || !!loadError}
               onClick={handleSave}
               icon={<SafetyCertificateOutlined />}
             >
@@ -506,9 +505,9 @@ function PermissionDrawer({ open, role, onClose, onSaved }: PermissionDrawerProp
 
       {/* 树主体区域 */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
-        {loadingTree ? (
+        {loadingRole ? (
           <div className="flex justify-center py-16">
-            <Spin size="large" tip="加载权限树..." />
+            <Spin size="large" tip="加载角色权限..." />
           </div>
         ) : loadError ? (
           <Alert

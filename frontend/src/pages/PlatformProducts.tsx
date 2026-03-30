@@ -1,14 +1,15 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert, Dropdown,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert, Dropdown, InputNumber,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
-import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined } from '@ant-design/icons';
+import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import request from '../lib/request';
 import ProductImage from '../components/ProductImage';
 import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
 import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
+import { CreateFbeShipmentModal } from './FbeShipments';
 
 const { Text } = Typography;
 
@@ -42,6 +43,12 @@ interface StoreProduct {
   platformStock?: number | null;
   platform_stock?: number | null;
   stock?: number | null;
+  // ERP 内部闭环在途量（以发货单为准，补货决策主依据）
+  inTransitQuantity?: number | null;
+  in_transit_quantity?: number | null;
+  // eMAG 平台同步的在途量（用于对账）
+  stockInTransit?: number | null;
+  stock_in_transit?: number | null;
   sales_stats?: { d7?: number; d14?: number; d30?: number } | null;
   salesStats?: { d7?: number; d14?: number; d30?: number } | null;
   d7?: number | null;
@@ -139,6 +146,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [selectedRows,    setSelectedRows]    = useState<StoreProduct[]>([]);
   const [planModalOpen,   setPlanModalOpen]   = useState(false);
+  // FBE 发货单弹窗
+  const [fbeModalOpen,    setFbeModalOpen]    = useState(false);
   const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
   const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
@@ -570,6 +579,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       key: 'image',
       width: 90,
       align: 'center',
+      fixed: 'left' as const,
       render: (_: unknown, r: StoreProduct) => {
         // 主图：后端已合并字段（平台图优先），依次回退兼容各字段命名
         const raw = r.image ?? r.main_image ?? r.mainImage ?? r.imageUrl ?? r.image_url ?? null;
@@ -584,7 +594,8 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       dataIndex: 'title',
       key: 'title',
       ellipsis: { showTitle: false },
-      width: 460,
+      width: 280,
+      fixed: 'left' as const,
       render: (_: unknown, r: StoreProduct) => {
         const name = r.title ?? r.name ?? r.product_name ?? r.productName ?? '';
         const partNumber = r.part_number ?? r.partNumber ?? '';
@@ -604,7 +615,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
                     overflow: 'hidden',
                     whiteSpace: 'nowrap',
                     textOverflow: 'ellipsis',
-                    maxWidth: 432,
+                    maxWidth: 260,
                     color: '#1890ff',
                     cursor: 'pointer',
                     fontSize: 14,
@@ -619,7 +630,7 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
                 </a>
               </Tooltip>
             ) : (
-              <Text strong ellipsis style={{ maxWidth: 432, display: 'block' }}>{titleContent}</Text>
+              <Text strong ellipsis style={{ maxWidth: 260, display: 'block' }}>{titleContent}</Text>
             )}
             {partNumber && (
               <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 4 }}>内部 PN：{partNumber}</div>
@@ -777,6 +788,63 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         return <span>{v != null ? v : '-'}</span>;
       },
     },
+    {
+      title: (
+        <span>
+          在途库存
+          <Tooltip title="ERP发货量：以 FBE 发货单为准，为补货决策主依据；eMAG平台量：平台同步识别的在途数，用于对账">
+            <InfoCircleOutlined style={{ marginLeft: 4, color: '#94a3b8', fontSize: 12, cursor: 'help' }} />
+          </Tooltip>
+        </span>
+      ),
+      dataIndex: 'inTransitQuantity',
+      key: 'inTransitQuantity',
+      width: 130,
+      align: 'center',
+      fixed: 'right' as const,
+      render: (_: unknown, r: StoreProduct) => {
+        const erp      = r.inTransitQuantity ?? r.in_transit_quantity ?? 0;
+        const platform = r.stockInTransit    ?? r.stock_in_transit    ?? null;
+
+        // 两者均为 0 / null
+        if (!erp && !platform) return <span style={{ color: '#94a3b8' }}>-</span>;
+
+        // 差异判断：均有值且不相等
+        const hasDiff = erp > 0 && platform !== null && platform !== erp;
+
+        return (
+          <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            {/* ERP 主数据 */}
+            <Tooltip title={`ERP 发货单在途：${erp} 件`}>
+              <span style={{
+                color: erp > 0 ? '#2563eb' : '#94a3b8',
+                fontWeight: 700,
+                fontSize: 14,
+                fontFeatureSettings: '"tnum"',
+                lineHeight: 1.2,
+                cursor: 'default',
+              }}>
+                🚚 {erp}
+              </span>
+            </Tooltip>
+            {/* eMAG 平台辅助数据（有值才显示） */}
+            {platform !== null && (
+              <Tooltip title={`eMAG 平台识别在途：${platform} 件${hasDiff ? '（与ERP存在差异，请核查）' : ''}`}>
+                <span style={{
+                  fontSize: 11,
+                  color: hasDiff ? '#f59e0b' : '#94a3b8',
+                  fontFeatureSettings: '"tnum"',
+                  lineHeight: 1,
+                  cursor: 'default',
+                }}>
+                  平台: {platform}{hasDiff ? ' ⚠️' : ''}
+                </span>
+              </Tooltip>
+            )}
+          </div>
+        );
+      },
+    },
   ], [inventoryMap, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder]);
 
   return (
@@ -824,6 +892,15 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
                 icon: <FileTextOutlined />,
                 label: '📝 创建采购计划',
                 onClick: handleCreatePlan,
+              },
+              {
+                key: 'fbe',
+                icon: <span>📦</span>,
+                label: '📦 创建 FBE 发货单',
+                onClick: () => {
+                  if (selectedRows.length === 0) { message.warning('请先勾选需要发货的产品'); return; }
+                  setFbeModalOpen(true);
+                },
               },
             ] satisfies MenuProps['items'],
           }}
@@ -934,13 +1011,14 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
           style={{ marginBottom: 16, borderRadius: 8 }}
         />
       )}
-      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0', overflow: 'hidden' }}>
+      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0' }}>
         <Table<StoreProduct>
           dataSource={products}
           columns={columns}
           rowKey="id"
           loading={loading}
           onChange={handleTableChange}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 320px)' }}
           rowSelection={{
             selectedRowKeys,
             onChange: (keys, rows) => { setSelectedRowKeys(keys); setSelectedRows(rows); },
@@ -963,6 +1041,15 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
         rows={planRows}
         onCancel={() => setPlanModalOpen(false)}
         onSuccess={() => { setPlanModalOpen(false); setSelectedRowKeys([]); setSelectedRows([]); }}
+      />
+
+      {/* FBE 发货单弹窗 */}
+      <CreateFbeShipmentModal
+        open={fbeModalOpen}
+        shopId={shopId}
+        products={selectedRows}
+        onCancel={() => setFbeModalOpen(false)}
+        onSuccess={() => { setFbeModalOpen(false); setSelectedRowKeys([]); setSelectedRows([]); }}
       />
 
       {/* 手动贴图地址弹窗 */}
@@ -1104,3 +1191,4 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
     </div>
   );
 }
+

@@ -671,10 +671,10 @@ export default function PrivatePool({ onNavigate }: PrivatePoolProps) {
         <Button icon={<ReloadOutlined />} loading={loading} onClick={() => { setPage(1); fetchProducts(1, pageSize); }}>刷新</Button>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100">
         <Table
           rowKey="id" dataSource={products} columns={columns} loading={loading}
-          scroll={{ x: 1700 }} size="large" onChange={handlePageChange}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 280px)' }} size="large" onChange={handlePageChange}
           pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], showQuickJumper: true, showTotal: (t, r) => `第 ${r[0]}–${r[1]} 条 / 共 ${t} 条` }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无采集产品，快去公海产品池选品吧！" style={{ padding: '64px 0' }} /> }}
           rowClassName="align-middle"

@@ -1114,13 +1114,13 @@ export default function PublicPool() {
       </div>
 
       {/* ── 产品表格 ── */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100">
         <Table
           rowKey="id"
           dataSource={products}
           columns={columns}
           loading={loading}
-          scroll={{ x: 1440 }}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 290px)' }}
           size="large"
           onChange={handlePageChange}
           pagination={{
