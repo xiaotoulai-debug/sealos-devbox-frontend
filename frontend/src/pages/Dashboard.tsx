@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getStoredPermissions, isAdminUser, writeAuthCache, clearAuth, type StoredUser } from '../lib/auth';
 import dayjs, { type Dayjs } from 'dayjs';
 import request from '../lib/request';
-import { formatCurrencySuffix } from '../lib/currency';
 import PublicPool from './PublicPool';
 import PrivatePool from './PrivatePool';
 import ProcurementPlanning from './ProcurementPlanning';
@@ -21,18 +20,22 @@ import SyncStatusBar from '../components/SyncStatusBar';
 import { ALL_MENU_ITEMS, type AppMenuItem } from '../lib/menuConfig';
 import {
   Layout, Menu, Avatar, Dropdown, Tag, Badge,
-  Typography, Space, Button, Statistic, DatePicker, Spin, Select, Alert, message,
+  Typography, Space, Button, Statistic, DatePicker, Spin, Alert, message,
+  Segmented, Table,
 } from 'antd';
 import {
   TeamOutlined,
   LogoutOutlined,
   UserOutlined,
-  RiseOutlined,
   ShoppingCartOutlined,
   BellOutlined,
   ClockCircleOutlined,
   DownOutlined,
   SettingOutlined,
+  RollbackOutlined,
+  TrophyOutlined,
+  LineChartOutlined,
+  TableOutlined,
 } from '@ant-design/icons';
 import {
   ResponsiveContainer,
@@ -42,6 +45,7 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip as ReTooltip,
+  Legend as ReLegend,
 } from 'recharts';
 
 const { Sider, Header, Content } = Layout;
@@ -59,7 +63,8 @@ const statPopStyle = `
 }
 `;
 
-const SELECTED_SHOP_KEY = 'selectedShopId';
+// 分店对比图颜色池（循环使用）
+const SHOP_COLORS = ['#2563EB', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'];
 
 // ── 从 localStorage 读取登录用户信息 ─────────────────────────
 function getStoredUser() {
@@ -168,35 +173,115 @@ interface DashboardStatsData {
   awaitingAcknowledge?: number;
   awaiting_acknowledge?: number;
   currency?: string | null;
+  // ★ 扩展字段（后端接口跟进后自动生效，暂时占位为 0）
+  estimatedProfit?: number;
+  estimated_profit?: number;
+  refundCount?: number;
+  refund_count?: number;
 }
 
-// ── 趋势图单日数据 ─────────────────────────────────────────────
+// ── 趋势图单日数据（兼容后端各种字段命名风格）────────────────
 interface TrendDayItem {
-  day?: string;
-  date?: string;
-  orders?: number;
-  sales?: number;
-  order_count?: number;
+  day?:          string;
+  date?:         string;
+  shopId?:       number;
+  shop_id?:      number;
+  shopName?:     string;
+  shop_name?:    string;
+  region?:       string;
+  // 订单量：兼容驼峰与下划线
+  orderCount?:   number;
+  order_count?:  number;
+  order_num?:    number;
+  orders?:       number;
+  count?:        number;
+  // 销售额
   sales_amount?: number;
-  gmv?: number;
+  salesAmount?:  number;
+  sales?:        number;
+  gmv?:          number;
+}
+
+// ── storeSummaries 预聚合行（后端有则直接用）─────────────────
+interface StoreSummaryItem {
+  shopId:           number;
+  shop_id?:         number;
+  shopName?:        string;
+  shop_name?:       string;
+  // 后端直接字段（优先）
+  yesterday?:       number;
+  week7?:           number;
+  month30?:         number;
+  // 驼峰别名
+  yesterdayCount?:  number;
+  yesterday_count?: number;
+  week7Count?:      number;
+  week7_count?:     number;
+  month30Count?:    number;
+  month30_count?:   number;
+  // 汇总
+  totalCount?:      number;
+  total_count?:     number;
+  orderCount?:      number;
+  order_count?:     number;
+}
+
+// ── 全局一站式 API 响应结构 ───────────────────────────────────
+interface GlobalStatsResponse {
+  code: number;
+  data: {
+    generatedAt?: string;
+    dateRange?:   { start?: string; end?: string; startDate?: string; endDate?: string };
+    // 全局 KPI（来自 globalTotals 或根层字段）
+    globalTotals?: {
+      totalOrders?:         number;
+      total_orders?:        number;
+      awaitingAcknowledge?: number;
+      awaiting_acknowledge?:number;
+      refundCount?:         number;
+      refund_count?:        number;
+    };
+    total_orders?:         number;
+    totalOrders?:          number;
+    awaiting_acknowledge?: number;
+    awaitingAcknowledge?:  number;
+    refund_count?:         number;
+    refundCount?:          number;
+    currency?:             string;
+    // 扁平趋势数组（每行含 shopId + date，后端真实字段名）
+    dailyTrends?:  TrendDayItem[];
+    daily_trends?: TrendDayItem[];
+    // 预聚合分店汇总（若后端提供）
+    storeSummaries?:  StoreSummaryItem[];
+    store_summaries?: StoreSummaryItem[];
+    // 兼容老字段
+    trend?:      TrendDayItem[];
+    trend_data?: TrendDayItem[];
+    trendData?:  TrendDayItem[];
+    shops?:      StoreSummaryItem[];
+    shopTrends?: StoreSummaryItem[];
+    shop_trends?:StoreSummaryItem[];
+    table?:      StoreSummaryItem[];
+  };
 }
 
 // ── 时间范围预设 ─────────────────────────────────────────────
-type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'custom';
+type TimeRangePreset = 'yesterday' | '7d' | '14d' | '30d' | 'custom';
 
 function getRangeForPreset(preset: TimeRangePreset, customRange: [Dayjs, Dayjs] | null): [string, string] {
-  const today = dayjs().format('YYYY-MM-DD');
+  const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
   if (preset === 'custom' && customRange) {
     return [customRange[0].format('YYYY-MM-DD'), customRange[1].format('YYYY-MM-DD')];
   }
+  if (preset === 'yesterday') return [yesterday, yesterday];
+  const today = dayjs().format('YYYY-MM-DD');
   const start = (
     {
-      today: dayjs().format('YYYY-MM-DD'),
-      '7d': dayjs().subtract(6, 'day').format('YYYY-MM-DD'),
+      '7d':  dayjs().subtract(6,  'day').format('YYYY-MM-DD'),
       '14d': dayjs().subtract(13, 'day').format('YYYY-MM-DD'),
       '30d': dayjs().subtract(29, 'day').format('YYYY-MM-DD'),
       custom: today,
-    } as Record<TimeRangePreset, string>
+    } as Record<string, string>
   )[preset] ?? today;
   return [start, today];
 }
@@ -290,13 +375,12 @@ export default function Dashboard() {
     }
   }, [searchParams, gotoKey]);
 
-  // ── 时间筛选 ─────────────────────────────────────────────────
-  const [timeRangePreset, setTimeRangePreset] = useState<TimeRangePreset>('7d');
+  // ── 时间筛选（默认：昨日）────────────────────────────────────
+  const [timeRangePreset, setTimeRangePreset] = useState<TimeRangePreset>('30d');
   const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
 
-  // ── 店铺选择（从缓存或接口获取）────────────────────────────────
+  // ── 店铺列表（全局大盘，始终展示所有店铺）───────────────────
   const [shops, setShops] = useState<ShopOption[]>([]);
-  const [shopId, setShopId] = useState<number | null>(null);
   const [shopsFetched, setShopsFetched] = useState(false);
 
   const fetchShops = useCallback(async () => {
@@ -310,21 +394,7 @@ export default function Dashboard() {
           : [];
       setShops(list);
       setShopsFetched(true);
-      console.log('=== FRONTEND SHOP DROPDOWN ===', list);
-      const cached = localStorage.getItem(SELECTED_SHOP_KEY);
-      const cachedId = cached ? parseInt(cached, 10) : NaN;
-      const validCached = list.some((s) => s.id === cachedId);
-      if (validCached && !isNaN(cachedId)) {
-        setShopId(cachedId);
-      } else if (list.length > 0) {
-        const first = list[0].id;
-        setShopId(first);
-        localStorage.setItem(SELECTED_SHOP_KEY, String(first));
-      } else {
-        setShopId(null);
-      }
     } catch {
-      setShopId(null);
       setShopsFetched(true);
     }
   }, []);
@@ -333,97 +403,181 @@ export default function Dashboard() {
     if (activeKey === 'dashboard') fetchShops();
   }, [activeKey, fetchShops]);
 
-  const handleShopChange = (id: number | null) => {
-    setShopId(id);
-    if (id != null) localStorage.setItem(SELECTED_SHOP_KEY, String(id));
-    else localStorage.removeItem(SELECTED_SHOP_KEY);
-  };
+  // ── 视图切换（图表 / 数据表）────────────────────────────────
+  const [viewMode, setViewMode] = useState<'chart' | 'table'>('chart');
+  // 表格视图：各店铺分期订单量
+  const [shopTableStats, setShopTableStats] = useState<Record<number, { yesterday: number; week7: number; month30: number }>>({});
 
-  // ── 实时业绩看板数据 ─────────────────────────────────────────
+  // ── 仪表盘数据（全部来自单次 global-stats 请求）────────────
   const [stats, setStats] = useState<DashboardStatsData | null>(null);
-  const [statsLoading, setStatsLoading] = useState(true);
   const [trendData, setTrendData] = useState<TrendDayItem[]>([]);
-  const [trendLoading, setTrendLoading] = useState(true);
+  const [shopSeriesData, setShopSeriesData] = useState<Record<number, { day: string; order_count: number; sales_amount: number }[]>>({});
+  const [globalLoading, setGlobalLoading] = useState(true);
 
-  const isLoading = statsLoading || trendLoading;
+  const isLoading = globalLoading;
 
-  const fetchStats = useCallback(async (start: string, end: string, sid: number | null) => {
-    setStatsLoading(true);
+  // ──────────────────────────────────────────────────────────────
+  // ★ 唯一数据源：GET /api/dashboard/global-stats（仅发一次请求）
+  // ──────────────────────────────────────────────────────────────
+  const fetchGlobalStats = useCallback(async (start: string, end: string) => {
+    setGlobalLoading(true);
     try {
-      const params: Record<string, string | number> = { startDate: start, endDate: end };
-      if (sid != null) params.shopId = sid;
-      const { data: res } = await request.get<{
-        code: number;
-        data: DashboardStatsData & { trend_data?: TrendDayItem[]; trendData?: TrendDayItem[] };
-      }>('/dashboard/stats', { params });
-      if (res.code === 200 && res.data) {
-        setStats(res.data);
-        const rawTrend = (res.data as { trend_data?: TrendDayItem[]; trendData?: TrendDayItem[] }).trend_data
-          ?? (res.data as { trend_data?: TrendDayItem[]; trendData?: TrendDayItem[] }).trendData;
-        if (Array.isArray(rawTrend) && rawTrend.length > 0) {
-          const mapped = rawTrend.map((d: TrendDayItem) => {
-            const date = d.date ?? '';
-            const day = d.day ?? (date ? dayjs(date).format('MM-DD') : '');
-            const orderCount = Number(d.order_count ?? d.orders ?? 0) || 0;
-            const salesAmount = Number(d.sales_amount ?? d.sales ?? d.gmv ?? 0) || 0;
-            return { day, date, order_count: orderCount, sales_amount: salesAmount };
-          });
-          mapped.sort((a, b) => (a.date || a.day).localeCompare(b.date || b.day));
-          setTrendData(mapped);
-        }
-      } else {
-        setStats({ totalOrders: 0, gmv: 0, awaitingAcknowledge: 0 });
-      }
-    } catch (err) {
-      setStats({ totalOrders: 0, gmv: 0, awaitingAcknowledge: 0 });
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      if (status === 401) {
-        clearAuth();
-        window.location.href = '/login';
-      }
-    } finally {
-      setStatsLoading(false);
-    }
-  }, []);
+      const { data: res } = await request.get<GlobalStatsResponse>(
+        '/dashboard/global-stats',
+        { params: { startDate: start, endDate: end } },
+      );
 
-  const fetchTrend = useCallback(async (start: string, end: string, sid: number | null) => {
-    setTrendLoading(true);
-    try {
-      const params: Record<string, string | number> = { startDate: start, endDate: end };
-      if (sid != null) params.shopId = sid;
-      const { data: res } = await request.get<{ code: number; data: TrendDayItem[] }>('/dashboard/trend', {
-        params,
-      });
-      if (res.code === 200 && Array.isArray(res.data)) {
-        const mapped = res.data.map((d: TrendDayItem) => {
-          const date = d.date ?? '';
-          const day = d.day ?? (date ? dayjs(date).format('MM-DD') : '');
-          const orderCount = Number(d.order_count ?? d.orders ?? 0) || 0;
-          const salesAmount = Number(d.sales_amount ?? d.sales ?? d.gmv ?? 0) || 0;
-          return { day, date, order_count: orderCount, sales_amount: salesAmount };
-        });
-        mapped.sort((a, b) => (a.date || a.day).localeCompare(b.date || b.day));
-        setTrendData(mapped);
-      } else {
+      if (res.code !== 200 || !res.data) {
+        setStats({ totalOrders: 0, awaitingAcknowledge: 0 });
         setTrendData([]);
+        setShopSeriesData({});
+        setShopTableStats({});
+        return;
       }
+
+      const d = res.data;
+
+      // ── 辅助：统一提取单行的订单量（兼容 orderCount / order_count / orders 等）
+      const pickCount = (item: TrendDayItem | StoreSummaryItem): number =>
+        Number(
+          (item as TrendDayItem).orderCount   ??
+          (item as TrendDayItem).order_count  ??
+          (item as TrendDayItem).order_num    ??
+          (item as TrendDayItem).orders       ??
+          (item as TrendDayItem).count        ??
+          (item as StoreSummaryItem).totalCount ??
+          (item as StoreSummaryItem).total_count ??
+          0,
+        ) || 0;
+
+      // ── 辅助：规范化 TrendDayItem 为图表所需格式
+      const normDay = (item: TrendDayItem) => {
+        const date = item.date ?? '';
+        return {
+          day:          item.day ?? (date ? dayjs(date).format('MM-DD') : ''),
+          date,
+          order_count:  pickCount(item),
+          sales_amount: Number(item.salesAmount ?? item.sales_amount ?? item.sales ?? item.gmv ?? 0) || 0,
+        };
+      };
+
+      // ── 1. 提取扁平 dailyTrends 数组（后端真实字段名）────────
+      const flatTrends: TrendDayItem[] =
+        d.dailyTrends  ??
+        d.daily_trends ??
+        d.trend        ??
+        d.trend_data   ??
+        d.trendData    ??
+        [];
+
+      // ── 2. 全局 KPI ─────────────────────────────────────────
+      // 优先读 globalTotals，其次根层字段，最后从 dailyTrends 汇总兜底
+      const gt = d.globalTotals;
+      const totalOrdersVal =
+        gt?.totalOrders ?? gt?.total_orders ??
+        d.totalOrders   ?? d.total_orders   ??
+        flatTrends.reduce((s, r) => s + pickCount(r), 0);
+
+      setStats({
+        totalOrders:         totalOrdersVal,
+        awaitingAcknowledge: gt?.awaitingAcknowledge ?? gt?.awaiting_acknowledge ?? d.awaitingAcknowledge ?? d.awaiting_acknowledge ?? 0,
+        refundCount:         gt?.refundCount         ?? gt?.refund_count         ?? d.refundCount         ?? d.refund_count         ?? 0,
+        currency:            d.currency ?? null,
+      });
+
+      // ── 3. 全局趋势（按日期聚合所有店铺，得到一条合计曲线）──
+      const globalByDate = new Map<string, { day: string; date: string; order_count: number; sales_amount: number }>();
+      flatTrends.forEach((item) => {
+        const date = item.date ?? '';
+        const day  = item.day ?? (date ? dayjs(date).format('MM-DD') : '');
+        const key  = date || day;
+        if (!key) return;
+        const prev = globalByDate.get(key) ?? { day, date, order_count: 0, sales_amount: 0 };
+        globalByDate.set(key, {
+          ...prev,
+          order_count:  prev.order_count  + pickCount(item),
+          sales_amount: prev.sales_amount + Number(item.salesAmount ?? item.sales_amount ?? item.sales ?? item.gmv ?? 0) || 0,
+        });
+      });
+      const mappedTrend = [...globalByDate.values()].sort(
+        (a, b) => (a.date || a.day).localeCompare(b.date || b.day),
+      );
+      setTrendData(mappedTrend);
+
+      // ── 4. 各店铺多系列（图表）：按 shopId 分组 dailyTrends ──
+      const seriesMap: Record<number, { day: string; order_count: number; sales_amount: number }[]> = {};
+      flatTrends.forEach((item) => {
+        const sid = item.shopId ?? item.shop_id;
+        if (sid == null) return;
+        if (!seriesMap[sid]) seriesMap[sid] = [];
+        seriesMap[sid].push(normDay(item));
+      });
+      // 各店内按日期排序
+      Object.values(seriesMap).forEach((arr) =>
+        arr.sort((a, b) => (a.date || a.day).localeCompare(b.date || b.day)),
+      );
+      setShopSeriesData(seriesMap);
+
+      // ── 5. 各店铺表格三期聚合 ─────────────────────────────────
+      // 优先用后端预聚合的 storeSummaries，否则从 dailyTrends reduce
+      const summaryList: StoreSummaryItem[] =
+        d.storeSummaries  ??
+        d.store_summaries ??
+        (d.shops as StoreSummaryItem[] | undefined) ??
+        (d.shopTrends as StoreSummaryItem[] | undefined) ??
+        (d.shop_trends as StoreSummaryItem[] | undefined) ??
+        (d.table as StoreSummaryItem[] | undefined) ??
+        [];
+
+      const tableMap: Record<number, { yesterday: number; week7: number; month30: number }> = {};
+
+      if (summaryList.length > 0) {
+        // 后端已聚合 → 直接映射（优先读直接字段 yesterday/week7/month30）
+        summaryList.forEach((s) => {
+          const sid = s.shopId ?? s.shop_id ?? 0;
+          tableMap[sid] = {
+            yesterday: Number(s.yesterday ?? s.yesterdayCount ?? s.yesterday_count ?? 0) || 0,
+            week7:     Number(s.week7     ?? s.week7Count     ?? s.week7_count     ?? 0) || 0,
+            month30:   Number(s.month30   ?? s.month30Count   ?? s.month30_count   ?? 0) || 0,
+          };
+        });
+      } else {
+        // 防呆兜底：从 dailyTrends 按日期 reduce 出三期数据
+        const todayStr     = dayjs().format('YYYY-MM-DD');
+        const yesterdayStr = dayjs().subtract(1,  'day').format('YYYY-MM-DD');
+        const day7AgoStr   = dayjs().subtract(6,  'day').format('YYYY-MM-DD');
+        const day30AgoStr  = dayjs().subtract(29, 'day').format('YYYY-MM-DD');
+
+        flatTrends.forEach((item) => {
+          const sid  = item.shopId ?? item.shop_id;
+          if (sid == null) return;
+          const date = item.date ?? '';
+          if (!tableMap[sid]) tableMap[sid] = { yesterday: 0, week7: 0, month30: 0 };
+          const cnt = pickCount(item);
+          if (date === yesterdayStr)                         tableMap[sid].yesterday += cnt;
+          if (date >= day7AgoStr   && date <= todayStr)     tableMap[sid].week7     += cnt;
+          if (date >= day30AgoStr  && date <= todayStr)     tableMap[sid].month30   += cnt;
+        });
+      }
+      setShopTableStats(tableMap);
+
     } catch (err) {
-      setTrendData([]);
       const status = (err as { response?: { status?: number } })?.response?.status;
-      if (status === 401) {
-        clearAuth();
-        window.location.href = '/login';
-      }
+      if (status === 401) { clearAuth(); window.location.href = '/login'; return; }
+      setStats({ totalOrders: 0, awaitingAcknowledge: 0 });
+      setTrendData([]);
+      setShopSeriesData({});
+      setShopTableStats({});
     } finally {
-      setTrendLoading(false);
+      setGlobalLoading(false);
     }
   }, []);
 
+  // ── 统一刷新入口 ─────────────────────────────────────────────
   const refreshDashboard = useCallback(() => {
     const [s, e] = getRangeForPreset(timeRangePreset, customRange);
-    fetchStats(s, e, shopId);
-    fetchTrend(s, e, shopId);
-  }, [timeRangePreset, customRange, shopId, fetchStats, fetchTrend]);
+    fetchGlobalStats(s, e);   // ← 唯一一次 HTTP 请求
+  }, [timeRangePreset, customRange, fetchGlobalStats]);
 
   useEffect(() => {
     refreshDashboard();
@@ -439,35 +593,56 @@ export default function Dashboard() {
     setTimeRangePreset(preset);
     if (preset !== 'custom') setCustomRange(null);
     const [s, e] = getRangeForPreset(preset, preset === 'custom' ? customRange : null);
-    fetchStats(s, e, shopId);
-    fetchTrend(s, e, shopId);
+    fetchGlobalStats(s, e);
   };
 
   const handleCustomRangeChange = (dates: null | [Dayjs | null, Dayjs | null]) => {
     if (dates && dates[0] && dates[1]) {
       setCustomRange([dates[0], dates[1]]);
       setTimeRangePreset('custom');
-      const [s, e] = [dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD')];
-      fetchStats(s, e, shopId);
-      fetchTrend(s, e, shopId);
+      fetchGlobalStats(dates[0].format('YYYY-MM-DD'), dates[1].format('YYYY-MM-DD'));
     }
   };
 
-  const totalOrders = stats ? (stats.totalOrders ?? stats.total_orders ?? 0) : 0;
-  const gmv = stats != null ? Number(stats.gmv ?? 0) || 0 : 0;
+  const totalOrders         = stats ? (stats.totalOrders ?? stats.total_orders ?? 0) : 0;
   const awaitingAcknowledge = stats ? (stats.awaitingAcknowledge ?? stats.awaiting_acknowledge ?? 0) : 0;
-  const isAllZero = totalOrders === 0 && gmv === 0 && awaitingAcknowledge === 0;
+  const refundCount         = stats ? (stats.refundCount ?? stats.refund_count ?? 0) : 0;
+  const isAllZero = totalOrders === 0 && awaitingAcknowledge === 0 && refundCount === 0;
 
-  // 货币 100% 依赖后端 API 返回的 currency 字段
-  const statsCurrency = (stats as DashboardStatsData)?.currency ?? '';
-  const currencySuffix = formatCurrencySuffix(statsCurrency);
+  // ★ 分店对比：将各店铺趋势合并为单一时间序列，每店「订单量」作为独立字段
+  const mergedShopTrend = useMemo(() => {
+    const entries = Object.entries(shopSeriesData);
+    if (entries.length === 0) return [];
+    const allDays = new Set<string>();
+    entries.forEach(([, series]) => series.forEach((d) => allDays.add(d.day)));
+    return Array.from(allDays).sort().map((day) => {
+      const item: Record<string, string | number> = { day };
+      entries.forEach(([sid, series]) => {
+        const found = series.find((d) => d.day === day);
+        item[`shop_${sid}`] = found?.order_count ?? 0;  // ★ 改为 order_count
+      });
+      return item;
+    });
+  }, [shopSeriesData]);
+
+  // ★ 各店铺单量排行（全部时间段累计）
+  const shopRanking = useMemo(() => {
+    return shops
+      .map((shop) => {
+        const series = shopSeriesData[shop.id] ?? [];
+        const count = series.reduce((sum, d) => sum + (d.order_count ?? 0), 0);
+        return { shop, count };
+      })
+      .filter(({ count }) => count > 0)
+      .sort((a, b) => b.count - a.count);
+  }, [shops, shopSeriesData]);
 
   const trendChartLabel = {
-    today: '今日',
-    '7d': '近 7 日',
-    '14d': '近 14 日',
-    '30d': '近 30 日',
-    custom: '自定义',
+    yesterday: '昨日',
+    '7d':      '近 7 日',
+    '14d':     '近 14 日',
+    '30d':     '近 30 日',
+    custom:    '自定义',
   }[timeRangePreset];
 
   const handleLogout = () => {
@@ -568,45 +743,32 @@ export default function Dashboard() {
 
         {/* ── 内容区 ── */}
         <Content className="bg-gray-50 min-h-screen" style={{ overflowY: 'auto' }}>
-          <SyncStatusBar shopId={shopId} />
+          <SyncStatusBar shopId={null} />
           <div style={{ padding: 32 }}>
           {/* 仪表盘首页 */}
           {activeKey === 'dashboard' && (
             <>
               {/* 仪表盘定位说明 */}
               <Alert
-                message="授权店铺真实经营数据"
-                description="仅展示授权店铺的销量、GMV 和订单趋势，不统计公海产品数量。"
+                message="全公司订单量大盘"
+                description="汇总所有授权店铺的实际订单量，支持趋势图与数据表双视图切换。"
                 type="info"
                 showIcon
                 style={{ marginBottom: 16, borderRadius: 12 }}
               />
 
-              {/* 店铺选择 + 时间筛选器 */}
+              {/* 时间筛选器 */}
               <div className="flex flex-wrap items-center gap-3 mb-5">
-                {shops.length > 0 && (
-                  <Space size="small" className="mr-4">
-                    <span className="text-sm text-gray-500">店铺：</span>
-                    <Select
-                      size="small"
-                      value={shopId ?? undefined}
-                      onChange={(v) => handleShopChange(v ?? null)}
-                      options={shops.map((s) => ({ label: shopLabel(s), value: s.id }))}
-                      style={{ minWidth: 180 }}
-                      placeholder="选择店铺"
-                    />
-                  </Space>
-                )}
                 {shopsFetched && shops.length === 0 && (
                   <span className="text-sm text-amber-600 mr-4">请先在「系统设置 → 店铺授权」中添加店铺</span>
                 )}
                 <Space size="small" wrap>
                   <Button
-                    type={timeRangePreset === 'today' ? 'primary' : 'default'}
+                    type={timeRangePreset === 'yesterday' ? 'primary' : 'default'}
                     size="small"
-                    onClick={() => handlePresetClick('today')}
+                    onClick={() => handlePresetClick('yesterday')}
                   >
-                    今日
+                    昨日
                   </Button>
                   <Button
                     type={timeRangePreset === '7d' ? 'primary' : 'default'}
@@ -646,6 +808,7 @@ export default function Dashboard() {
                 <style>{statPopStyle}</style>
                 <div className="mb-7">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+                    {/* ① 总订单数 */}
                     <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex items-start gap-4">
                       <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-blue-50">
                         <ShoppingCartOutlined className="text-xl text-blue-500" />
@@ -654,28 +817,13 @@ export default function Dashboard() {
                         <p className="text-xs text-gray-400 mb-1 tracking-wide">总订单数</p>
                         <div key={totalOrders} className={totalOrders > 0 ? 'stat-pop-in' : ''}>
                           <Statistic
-                            value={statsLoading ? '-' : totalOrders}
+                            value={isLoading ? '-' : totalOrders}
                             valueStyle={{ fontSize: 22, fontWeight: 700, color: '#1e293b', lineHeight: 1.2 }}
                           />
                         </div>
                       </div>
                     </div>
-                    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex items-start gap-4">
-                      <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-emerald-50">
-                        <RiseOutlined className="text-xl text-emerald-500" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs text-gray-400 mb-1 tracking-wide">总金额 (GMV)</p>
-                        <div key={gmv} className={gmv > 0 ? 'stat-pop-in' : ''}>
-                          <Statistic
-                            value={statsLoading ? '-' : gmv}
-                            precision={2}
-                            suffix={currencySuffix ? ` ${currencySuffix}` : undefined}
-                            valueStyle={{ fontSize: 22, fontWeight: 700, color: '#1e293b', lineHeight: 1.2 }}
-                          />
-                        </div>
-                      </div>
-                    </div>
+                    {/* ② 待确认订单 */}
                     <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex items-start gap-4">
                       <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-amber-50">
                         <ClockCircleOutlined className="text-xl text-amber-500" />
@@ -684,97 +832,218 @@ export default function Dashboard() {
                         <p className="text-xs text-gray-400 mb-1 tracking-wide">待确认订单</p>
                         <div key={awaitingAcknowledge} className={awaitingAcknowledge > 0 ? 'stat-pop-in' : ''}>
                           <Statistic
-                            value={statsLoading ? '-' : awaitingAcknowledge}
-                            valueStyle={{ fontSize: 22, fontWeight: 700, color: '#1e293b', lineHeight: 1.2 }}
+                            value={isLoading ? '-' : awaitingAcknowledge}
+                            valueStyle={{ fontSize: 22, fontWeight: 700, color: awaitingAcknowledge > 0 ? '#d97706' : '#1e293b', lineHeight: 1.2 }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    {/* ③ 退款单量 */}
+                    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex items-start gap-4">
+                      <div className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0 bg-red-50">
+                        <RollbackOutlined className="text-xl text-red-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-400 mb-1 tracking-wide">退款单量</p>
+                        <div key={refundCount} className={refundCount > 0 ? 'stat-pop-in' : ''}>
+                          <Statistic
+                            value={isLoading ? '-' : refundCount}
+                            valueStyle={{ fontSize: 22, fontWeight: 700, color: refundCount > 0 ? '#ef4444' : '#1e293b', lineHeight: 1.2 }}
                           />
                         </div>
                       </div>
                     </div>
                   </div>
-                  {!statsLoading && isAllZero && shopId != null && (
+                  {!isLoading && isAllZero && (
                     <Alert
-                      message={`当前展示为 ${shops.find((s) => s.id === shopId)?.shopName ?? '当前店铺'} 的真实经营数据。公海产品需发布为出价后方可产生销量。`}
-                      type="info"
-                      showIcon
-                      style={{ marginTop: 16, borderRadius: 12 }}
+                      message="当前时段全部店铺订单量为零，公海产品需发布为出价后方可产生销量。"
+                      type="info" showIcon style={{ marginTop: 16, borderRadius: 12 }}
                     />
                   )}
                 </div>
 
-                {/* 订单趋势图 - 随时间段拉伸/压缩 */}
-                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 mb-7">
-                  <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
-                    <div>
-                      <p className="text-sm font-semibold text-gray-800">{trendChartLabel}订单趋势</p>
-                      <p className="text-xs text-gray-400 mt-0.5">订单量 &amp; 销售额双轴对比</p>
-                    </div>
-                    <Tag bordered={false} color="blue">{trendChartLabel}</Tag>
-                  </div>
-                  <div className="px-2 py-5" style={{ height: 280 }} key={timeRangePreset}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart
-                        data={trendData}
-                        margin={{ top: 4, right: 24, left: 0, bottom: trendData.length > 14 ? 40 : 8 }}
-                      >
-                      <defs>
-                        <linearGradient id="gradSales" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor="#2563EB" stopOpacity={0.15} />
-                          <stop offset="95%" stopColor="#2563EB" stopOpacity={0} />
-                        </linearGradient>
-                        <linearGradient id="gradOrders" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%"  stopColor="#10b981" stopOpacity={0.15} />
-                          <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                      <XAxis
-                        dataKey="day"
-                        tick={{ fontSize: 11, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                        interval={trendData.length > 14 ? Math.max(0, Math.floor(trendData.length / 10)) : 0}
-                        angle={trendData.length > 14 ? -35 : 0}
-                        textAnchor={trendData.length > 14 ? 'end' : 'middle'}
-                      />
-                      <YAxis
-                        yAxisId="order_count"
-                        tick={{ fontSize: 11, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <YAxis
-                        yAxisId="sales_amount"
-                        orientation="right"
-                        tick={{ fontSize: 11, fill: '#94a3b8' }}
-                        axisLine={false}
-                        tickLine={false}
-                        tickFormatter={(v: number) => `${(v / 1000).toFixed(0)}k${currencySuffix ? ` ${currencySuffix}` : ''}`}
-                      />
-                      <ReTooltip
-                        contentStyle={{ borderRadius: 10, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.06)', fontSize: 12 }}
-                        formatter={(value: number | undefined, name: string) => {
-                          const v = Number(value ?? 0) || 0;
-                          return name === 'sales_amount' ? [`${v.toFixed(2)}${currencySuffix ? ` ${currencySuffix}` : ''}`, '销售额'] : [v, '订单量'];
-                        }}
-                        labelFormatter={(label) => `日期: ${label}`}
-                      />
-                      <Area yAxisId="sales_amount" type="natural" dataKey="sales_amount" stroke="#2563EB" strokeWidth={2} fill="url(#gradSales)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-                      <Area yAxisId="order_count" type="natural" dataKey="order_count" stroke="#10b981" strokeWidth={2} fill="url(#gradOrders)" dot={false} activeDot={{ r: 4, strokeWidth: 0 }} />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                {/* ── 视图切换 Toggle ──────────────────────────── */}
+                <div className="flex justify-end mb-4">
+                  <Segmented
+                    value={viewMode}
+                    onChange={(v) => setViewMode(v as 'chart' | 'table')}
+                    options={[
+                      { label: <Space size={4}><LineChartOutlined />趋势图</Space>, value: 'chart' },
+                      { label: <Space size={4}><TableOutlined />数据表</Space>, value: 'table' },
+                    ]}
+                  />
                 </div>
-                  {/* 图例 */}
-                  <div className="flex items-center gap-6 px-6 pb-5">
-                    <div className="flex items-center gap-2">
-                      <span className="w-3 h-3 rounded-full bg-blue-500 inline-block" />
-                      <span className="text-xs text-gray-500">销售额（右轴）</span>
+
+                {/* ── 图表视图（viewMode === 'chart'）────────────── */}
+                {viewMode === 'chart' && (
+                  <>
+                    {/* 多系列面积图：每店铺一条线 */}
+                    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 mb-7">
+                      <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-800">{trendChartLabel}各店铺订单量对比</p>
+                          <p className="text-xs text-gray-400 mt-0.5">各店铺订单量走势（每线代表一个店铺）</p>
+                        </div>
+                        <Tag bordered={false} color="blue">{trendChartLabel}</Tag>
+                      </div>
+                      <div className="px-2 py-5" style={{ height: 300 }} key={`${timeRangePreset}-per-shop`}>
+                        {isLoading ? (
+                          <div className="flex items-center justify-center h-full"><Spin tip="加载各店铺数据..." /></div>
+                        ) : mergedShopTrend.length === 0 ? (
+                          <div className="flex items-center justify-center h-full text-gray-300 text-sm">暂无分店数据</div>
+                        ) : (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={mergedShopTrend} margin={{ top: 4, right: 24, left: 0, bottom: mergedShopTrend.length > 14 ? 40 : 8 }}>
+                              <defs>
+                                {shops.map((shop, idx) => (
+                                  <linearGradient key={shop.id} id={`gradShop${shop.id}`} x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%"  stopColor={SHOP_COLORS[idx % SHOP_COLORS.length]} stopOpacity={0.18} />
+                                    <stop offset="95%" stopColor={SHOP_COLORS[idx % SHOP_COLORS.length]} stopOpacity={0} />
+                                  </linearGradient>
+                                ))}
+                              </defs>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                              <XAxis
+                                dataKey="day" tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false}
+                                interval={mergedShopTrend.length > 14 ? Math.max(0, Math.floor(mergedShopTrend.length / 10)) : 0}
+                                angle={mergedShopTrend.length > 14 ? -35 : 0}
+                                textAnchor={mergedShopTrend.length > 14 ? 'end' : 'middle'}
+                              />
+                              <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} axisLine={false} tickLine={false} />
+                              <ReTooltip
+                                contentStyle={{ borderRadius: 10, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(0,0,0,0.06)', fontSize: 12 }}
+                                formatter={(value: number | undefined, name: string) => {
+                                  const v = Number(value ?? 0) || 0;
+                                  const sid = Number(String(name).replace('shop_', ''));
+                                  return [v, shops.find((s) => s.id === sid)?.shopName ?? name];
+                                }}
+                                labelFormatter={(label) => `日期: ${label}`}
+                              />
+                              <ReLegend
+                                wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
+                                formatter={(value: string) => {
+                                  const sid = Number(value.replace('shop_', ''));
+                                  return shops.find((s) => s.id === sid)?.shopName ?? value;
+                                }}
+                              />
+                              {shops.map((shop, idx) => (
+                                <Area
+                                  key={shop.id} type="natural"
+                                  dataKey={`shop_${shop.id}`} name={`shop_${shop.id}`}
+                                  stroke={SHOP_COLORS[idx % SHOP_COLORS.length]} strokeWidth={2}
+                                  fill={`url(#gradShop${shop.id})`}
+                                  dot={false} activeDot={{ r: 4, strokeWidth: 0 }}
+                                />
+                              ))}
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-3 h-3 rounded-full bg-emerald-500 inline-block" />
-                      <span className="text-xs text-gray-500">订单量（左轴）</span>
+
+                    {/* 各店铺单量排行榜（图表视图下展示） */}
+                    {shopRanking.length > 0 && (
+                      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 mb-7">
+                        <div className="flex items-center gap-2 px-6 py-4 border-b border-gray-50">
+                          <TrophyOutlined style={{ color: '#f59e0b', fontSize: 16 }} />
+                          <p className="text-sm font-semibold text-gray-800">{trendChartLabel}各店铺单量排行</p>
+                        </div>
+                        <div className="px-6 py-4 space-y-3">
+                          {shopRanking.map(({ shop, count }, idx) => {
+                            const maxCount = shopRanking[0]?.count ?? 1;
+                            const pct = Math.round((count / maxCount) * 100);
+                            const color = SHOP_COLORS[idx % SHOP_COLORS.length];
+                            return (
+                              <div key={shop.id} className="flex items-center gap-3">
+                                <span style={{ width: 20, fontSize: 12, fontWeight: 700, color: idx === 0 ? '#f59e0b' : '#94a3b8', textAlign: 'right', flexShrink: 0 }}>#{idx + 1}</span>
+                                <span style={{ width: 140, fontSize: 12, color: '#374151', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shop.shopName}</span>
+                                <div style={{ flex: 1, background: '#f1f5f9', borderRadius: 4, height: 8, overflow: 'hidden' }}>
+                                  <div style={{ width: `${pct}%`, background: color, height: '100%', borderRadius: 4, transition: 'width 0.4s ease' }} />
+                                </div>
+                                <span style={{ width: 48, fontSize: 13, fontWeight: 700, color: '#1e293b', textAlign: 'right', flexShrink: 0 }}>{count}</span>
+                                <span style={{ fontSize: 11, color: '#94a3b8', flexShrink: 0 }}>单</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {/* ── 表格视图（viewMode === 'table'）────────────── */}
+                {viewMode === 'table' && (
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-100 mb-7">
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-gray-50">
+                      <div>
+                        <p className="text-sm font-semibold text-gray-800">各店铺订单量汇总</p>
+                        <p className="text-xs text-gray-400 mt-0.5">昨日 / 近7天 / 近30天  三期订单量对比</p>
+                      </div>
+                      <Button
+                        size="small" icon={<RollbackOutlined />}
+                        onClick={refreshDashboard} loading={isLoading}
+                      >刷新</Button>
                     </div>
+                    <Table
+                      loading={isLoading}
+                      dataSource={shops.map((shop) => ({
+                        key: shop.id,
+                        shopName: shopLabel(shop),
+                        yesterday: shopTableStats[shop.id]?.yesterday ?? (isLoading ? null : 0),
+                        week7:     shopTableStats[shop.id]?.week7     ?? (isLoading ? null : 0),
+                        month30:   shopTableStats[shop.id]?.month30   ?? (isLoading ? null : 0),
+                      }))}
+                      pagination={false}
+                      size="middle"
+                      style={{ borderRadius: 12 }}
+                      columns={[
+                        {
+                          title: '店铺',
+                          dataIndex: 'shopName',
+                          key: 'shopName',
+                          render: (name: string, _: unknown, idx: number) => (
+                            <Space size={6}>
+                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: SHOP_COLORS[idx % SHOP_COLORS.length], display: 'inline-block', flexShrink: 0 }} />
+                              <span style={{ fontSize: 13, fontWeight: 500, color: '#374151' }}>{name}</span>
+                            </Space>
+                          ),
+                        },
+                        {
+                          title: '昨日订单量',
+                          dataIndex: 'yesterday',
+                          key: 'yesterday',
+                          align: 'center' as const,
+                          render: (v: number | null) => v == null ? '-' : (
+                            <span style={{ fontSize: 14, fontWeight: 700, color: v > 0 ? '#2563EB' : '#9ca3af' }}>{v}</span>
+                          ),
+                          sorter: (a: { yesterday: number }, b: { yesterday: number }) => (a.yesterday ?? 0) - (b.yesterday ?? 0),
+                          defaultSortOrder: 'descend' as const,
+                        },
+                        {
+                          title: '近7天订单量',
+                          dataIndex: 'week7',
+                          key: 'week7',
+                          align: 'center' as const,
+                          render: (v: number | null) => v == null ? '-' : (
+                            <span style={{ fontSize: 14, fontWeight: 700, color: v > 0 ? '#059669' : '#9ca3af' }}>{v}</span>
+                          ),
+                          sorter: (a: { week7: number }, b: { week7: number }) => (a.week7 ?? 0) - (b.week7 ?? 0),
+                        },
+                        {
+                          title: '近30天订单量',
+                          dataIndex: 'month30',
+                          key: 'month30',
+                          align: 'center' as const,
+                          render: (v: number | null) => v == null ? '-' : (
+                            <span style={{ fontSize: 14, fontWeight: 700, color: v > 0 ? '#7c3aed' : '#9ca3af' }}>{v}</span>
+                          ),
+                          sorter: (a: { month30: number }, b: { month30: number }) => (a.month30 ?? 0) - (b.month30 ?? 0),
+                        },
+                      ]}
+                      locale={{ emptyText: shopsFetched && shops.length === 0 ? '暂无店铺数据' : '加载中...' }}
+                    />
                   </div>
-                </div>
+                )}
               </Spin>
             </>
           )}
@@ -784,7 +1053,10 @@ export default function Dashboard() {
 
           {/* 平台数据 - 平台产品 */}
           {activeKey === 'platform-products' && (
-            <PlatformProducts initialSearch={searchParams.get('sku') ?? searchParams.get('search') ?? undefined} />
+            <PlatformProducts
+              initialSearch={searchParams.get('sku') ?? searchParams.get('search') ?? undefined}
+              initialShopId={searchParams.get('shopId') ? Number(searchParams.get('shopId')) : undefined}
+            />
           )}
 
           {/* 平台数据 - 平台订单 */}

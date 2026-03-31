@@ -100,9 +100,10 @@ interface InventoryItem {
 
 interface PlatformProductsProps {
   initialSearch?: string;
+  initialShopId?: number;
 }
 
-export default function PlatformProducts({ initialSearch }: PlatformProductsProps) {
+export default function PlatformProducts({ initialSearch, initialShopId }: PlatformProductsProps) {
   const [loading, setLoading] = useState(false);
   const [products, setProducts] = useState<StoreProduct[]>([]);
   const [shops, setShops] = useState<{ id: number; shopName: string; platform: string; region?: string | null; site?: string | null }[]>([]);
@@ -185,16 +186,21 @@ export default function PlatformProducts({ initialSearch }: PlatformProductsProp
       const list = Array.isArray(res?.data) ? res.data : [];
       setShops(list);
       if (list.length > 0) {
-        const cached = localStorage.getItem('selectedShopId');
-        const cachedId = cached ? parseInt(cached, 10) : NaN;
-        const valid = list.some((s) => s.id === cachedId);
-        setShopId(valid && !isNaN(cachedId) ? cachedId : list[0].id);
+        // ★ 优先级：URL 传入的 shopId > localStorage 缓存 > 默认第一个店铺
+        if (initialShopId && list.some((s) => s.id === initialShopId)) {
+          setShopId(initialShopId);
+        } else {
+          const cached = localStorage.getItem('selectedShopId');
+          const cachedId = cached ? parseInt(cached, 10) : NaN;
+          const valid = list.some((s) => s.id === cachedId);
+          setShopId(valid && !isNaN(cachedId) ? cachedId : list[0].id);
+        }
       }
     } catch (err) {
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status !== 401) message.error('加载店铺列表失败');
     }
-  }, []);
+  }, [initialShopId]);
 
   const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean; page?: number; pageSize?: number; sortBy?: string | null; sortOrder?: 'ascend' | 'descend' | null; mappingStatus?: 'all' | 'mapped' | 'unmapped' }) => {
     if (sid == null) {

@@ -12,7 +12,6 @@ import {
   FilterOutlined, AppstoreOutlined, CalculatorOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
-import { isAdminUser, getStoredPermissions } from '../lib/auth';
 
 // ─── 罗马尼亚语 → 中文 翻译字典（覆盖四级类目常见名称）──────
 
@@ -650,8 +649,8 @@ export default function PublicPool() {
   const filtersRef = useRef(filters);
   filtersRef.current = filters;
 
-  // 超级管理员直接放行；普通用户需拥有 BTN_SELECT_PRODUCT 权限码
-  const canSelect = isAdminUser() || (getStoredPermissions() ?? []).includes('BTN_SELECT_PRODUCT');
+  // 已能访问本页面（MENU_PUBLIC_PRODUCTS 菜单权限），即有采集资格
+  const canSelect = true;
 
   // ── 加载品牌 ─────────────────────────────────────────────
 

@@ -136,6 +136,76 @@ function normalizeOrderProduct(raw: Record<string, unknown>): OrderProduct {
   };
 }
 
+// ─── PurchaseOrder 归一化 ─────────────────────────────────────
+// fetchOrders 拿到原始 JSON 后立即过此函数，统一字段命名，兼容后端 camelCase/snake_case 混用
+function normalizePurchaseOrder(raw: Record<string, unknown>): PurchaseOrder {
+  // ── DEBUG：在控制台打印原始数据，确认后端实际字段名 ──────────────
+  // 生产稳定后可删除此行
+  if (raw.id) {
+    const logFields = Object.keys(raw).filter((k) =>
+      k.toLowerCase().includes('logistic') ||
+      k.toLowerCase().includes('tracking') ||
+      k.toLowerCase().includes('bill') ||
+      k.toLowerCase().includes('waybill') ||
+      k.toLowerCase().includes('company') ||
+      k.toLowerCase().includes('shipment'),
+    );
+    if (logFields.length) {
+      console.log(`[PurchaseOrder #${raw.id}] 物流相关字段:`, Object.fromEntries(logFields.map((k) => [k, raw[k]])));
+    } else {
+      console.log(`[PurchaseOrder #${raw.id}] ⚠ 未发现任何物流字段。原始 keys:`, Object.keys(raw));
+    }
+  }
+
+  // ── 尝试从嵌套 logistics 对象中读取（兼容后端嵌套结构）──────────
+  const nested = (raw.logistics ?? raw.logisticsInfo ?? raw.logistic ?? null) as Record<string, unknown> | null;
+
+  // 物流公司：依次尝试 6 种命名变体 + 嵌套对象
+  const logisticsCompany = (
+    raw.logisticsCompany ??
+    raw.logistics_company ??
+    raw.courierCompany ??
+    raw.courier_company ??
+    nested?.company ??
+    nested?.logisticsCompany ??
+    null
+  ) as string | null | undefined;
+
+  // 运单号：依次尝试 8 种命名变体 + 嵌套对象
+  const trackingNumber = (
+    raw.trackingNumber    ??
+    raw.tracking_number   ??
+    raw.logisticsBillNo   ??
+    raw.logistics_bill_no ??
+    raw.billNo            ??
+    raw.bill_no           ??
+    raw.waybillNo         ??
+    raw.waybill_no        ??
+    nested?.trackingNumber ??
+    nested?.billNo        ??
+    nested?.trackingNo    ??
+    null
+  ) as string | null | undefined;
+
+  return {
+    id:               raw.id                as number,
+    orderNo:          (raw.orderNo          ?? raw.order_no          ?? '') as string,
+    operator:         (raw.operator         ?? '') as string,
+    totalAmount:      (raw.totalAmount      ?? raw.total_amount      ?? null) as number | null,
+    itemCount:        (raw.itemCount        ?? raw.item_count        ?? 0)    as number,
+    status:           (raw.status           ?? '') as string,
+    createdAt:        (raw.createdAt        ?? raw.created_at        ?? '') as string,
+    has1688Items:     (raw.has1688Items     ?? raw.has_1688_items     ?? null) as boolean | null | undefined,
+    allProductsMapped:(raw.allProductsMapped?? raw.all_products_mapped?? null) as boolean | null | undefined,
+    warehouseId:      (raw.warehouseId      ?? raw.warehouse_id      ?? null) as number | null | undefined,
+    warehouse:        (raw.warehouse        ?? null) as { id: number; name: string } | null | undefined,
+    supplierName:     (raw.supplierName     ?? raw.supplier_name     ?? null) as string | null | undefined,
+    alibabaOrderId:   (raw.alibabaOrderId   ?? raw.alibaba_order_id  ?? null) as string | null | undefined,
+    logisticsCompany,
+    trackingNumber,
+  };
+}
+
 // ─── 状态标签映射 ────────────────────────────────────────────
 
 const STATUS_MAP: Record<string, { label: string; color: string }> = {
@@ -202,7 +272,11 @@ export default function ProcurementManagement() {
         message: string;
       }>('/purchases', { params }); // 采购单接口：/purchases（不是平台订单 /orders）
       if (res.code === 200 && res.data) {
-        setOrders(Array.isArray(res.data.list) ? res.data.list : []);
+        setOrders(
+          Array.isArray(res.data.list)
+            ? res.data.list.map((r) => normalizePurchaseOrder(r as Record<string, unknown>))
+            : [],
+        );
         setTotal(res.data.total ?? 0);
       } else { message.error(res.message || '获取失败'); }
     } catch { message.error('请求失败，请检查网络或后端服务'); }
@@ -259,16 +333,25 @@ export default function ProcurementManagement() {
   const handleBatchSync = useCallback(async (orderId: number) => {
     setBatchSyncingId(orderId);
     try {
-      const { data: res } = await request.post<{ code: number; message?: string }>(
+      // ① 订单状态同步（主流程，失败直接抛出，阻断后续）
+      const { data: orderRes } = await request.post<{ code: number; message?: string }>(
         `/purchases/${orderId}/sync-1688`,
       );
-      if (res?.code === 200) {
-        message.success(res.message || '1688 订单信息同步成功');
-        fetchOrders(page, pageSize, activeTab, keyword);
-        setSubRefreshKey((k) => k + 1);
-      } else {
-        message.error(res?.message ?? '同步失败，请重试');
+      if (orderRes?.code !== 200) {
+        message.error(orderRes?.message ?? '1688 状态同步失败，请重试');
+        return;
       }
+
+      // ② 物流信息同步（容错：未发货时接口可能报错，不阻断主流程）
+      try {
+        await request.post(`/purchases/${orderId}/sync-logistics`);
+      } catch {
+        // 物流暂无属于正常情况，静默忽略，不影响后续刷新与提示
+      }
+
+      message.success('1688 状态及物流信息已同步');
+      fetchOrders(page, pageSize, activeTab, keyword);
+      setSubRefreshKey((k) => k + 1);
     } catch {
       message.error('同步失败，请检查网络');
     } finally {
@@ -314,6 +397,21 @@ export default function ProcurementManagement() {
         message.error(res.message || '撤销失败，请重试');
       }
     } catch { message.error('网络异常，撤销失败，请重试'); }
+  }, [refresh]);
+
+  // 删除采购单：仅 PENDING 状态可用，关联产品回流产品库
+  const handleDeleteOrder = useCallback(async (orderId: number) => {
+    try {
+      const { data: res } = await request.delete<{ code: number; message: string }>(
+        `/purchases/${orderId}`,
+      );
+      if (res.code === 200) {
+        message.success(res.message || '采购单已删除');
+        refresh();
+      } else {
+        message.error(res.message || '删除失败，请重试');
+      }
+    } catch { message.error('网络异常，请重试'); }
   }, [refresh]);
 
   // 内联仓库选择：PATCH 更新采购单目标仓库后刷新列表
@@ -604,11 +702,35 @@ export default function ProcurementManagement() {
                 同步
               </Button>
             )}
+
+            {/* ── 删除 / 作废（仅待下单可用） ─── */}
+            {isPending && (
+              <Popconfirm
+                title="确定要删除此采购单吗？"
+                description={
+                  <span style={{ maxWidth: 260, display: 'inline-block', lineHeight: 1.6 }}>
+                    关联的商品将被释放回产品库，此操作<strong>不可撤销</strong>。
+                  </span>
+                }
+                okText="确认删除"
+                cancelText="取消"
+                okButtonProps={{ danger: true }}
+                onConfirm={() => handleDeleteOrder(record.id)}
+              >
+                <Button
+                  type="link"
+                  danger
+                  size="small"
+                >
+                  删除
+                </Button>
+              </Popconfirm>
+            )}
           </Space>
         );
       },
     },
-  ], [handleBatchSync, batchSyncingId, setPlace1688Target, handleMarkPurchasing, setStockInTarget, handleRollback, warehouseOptions, handlePatchWarehouse, setLogisticsEditTarget, setLogisticsTraceTarget]);
+  ], [handleBatchSync, batchSyncingId, setPlace1688Target, handleMarkPurchasing, setStockInTarget, handleRollback, handleDeleteOrder, warehouseOptions, handlePatchWarehouse, setLogisticsEditTarget, setLogisticsTraceTarget]);
 
   // ── 嵌套子表 ──
 
