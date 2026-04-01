@@ -23,10 +23,16 @@ request.interceptors.request.use((config) => {
 request.interceptors.response.use(
   (response) => response,
   (error) => {
+    const cfg = axios.isAxiosError(error) ? error.config : undefined;
+    const reqUrl = String(cfg?.url ?? '');
+    // 登录接口 401（如密码错误）不应清 token / 强跳登录页，由 Login 页展示后端 message
     if (axios.isAxiosError(error) && error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+      const isLoginRequest = reqUrl.includes('/auth/login');
+      if (!isLoginRequest) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   },

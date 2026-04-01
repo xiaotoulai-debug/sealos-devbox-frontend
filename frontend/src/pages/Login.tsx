@@ -9,6 +9,21 @@ interface LoginFormValues {
   password: string;
 }
 
+/** 从 Axios 错误响应体解析后端 message（兼容统一格式 { message } 与纯字符串） */
+function extractBackendErrorMessage(err: unknown): string | undefined {
+  if (!axios.isAxiosError(err) || err.response?.data == null) return undefined;
+  const data = err.response.data;
+  if (typeof data === 'string') {
+    const t = data.trim();
+    return t || undefined;
+  }
+  if (typeof data === 'object' && data !== null && 'message' in data) {
+    const m = (data as { message?: unknown }).message;
+    if (typeof m === 'string' && m.trim()) return m.trim();
+  }
+  return undefined;
+}
+
 interface LoginResponseData {
   token: string;
   user: {
@@ -48,8 +63,17 @@ export default function Login() {
       }
     } catch (err) {
       if (axios.isAxiosError(err)) {
-        const msg = err.response?.data?.message ?? '网络异常，请检查后端服务是否启动';
-        message.error(msg);
+        const backendMsg = extractBackendErrorMessage(err);
+        const status = err.response?.status;
+        if (backendMsg) {
+          message.error(backendMsg);
+        } else if (status === 401) {
+          message.error('登录失败：账号或密码不正确，或服务端拒绝访问');
+        } else if (!err.response) {
+          message.error('网络异常，请检查后端服务是否启动');
+        } else {
+          message.error('登录失败，请稍后重试');
+        }
       } else {
         message.error('登录失败，请稍后重试');
       }
