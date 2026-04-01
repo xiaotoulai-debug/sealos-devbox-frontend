@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Button, Tooltip, message, Empty, Image, Typography, Drawer, Timeline, Space, Spin,
-  Modal, Select, Form, Tabs, Input, Alert, Popconfirm,
+  Modal, Select, Form, Tabs, Input, Alert, Popconfirm, InputNumber,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import {
@@ -193,7 +193,7 @@ function normalizePurchaseOrder(raw: Record<string, unknown>): PurchaseOrder {
     operator:         (raw.operator         ?? '') as string,
     totalAmount:      (raw.totalAmount      ?? raw.total_amount      ?? null) as number | null,
     itemCount:        (raw.itemCount        ?? raw.item_count        ?? 0)    as number,
-    status:           (raw.status           ?? '') as string,
+    status:           ((raw.status ?? raw.orderStatus ?? raw.order_status ?? '') as string).toUpperCase(),
     createdAt:        (raw.createdAt        ?? raw.created_at        ?? '') as string,
     has1688Items:     (raw.has1688Items     ?? raw.has_1688_items     ?? null) as boolean | null | undefined,
     allProductsMapped:(raw.allProductsMapped?? raw.all_products_mapped?? null) as boolean | null | undefined,
@@ -209,10 +209,11 @@ function normalizePurchaseOrder(raw: Record<string, unknown>): PurchaseOrder {
 // ─── 状态标签映射 ────────────────────────────────────────────
 
 const STATUS_MAP: Record<string, { label: string; color: string }> = {
-  PENDING:    { label: '待下单',  color: 'default' },
+  PENDING:    { label: '待下单',  color: 'default'    },
   PLACED:     { label: '已下单',  color: 'blue'       },
   PURCHASING: { label: '采购中',  color: 'processing' },
   IN_TRANSIT: { label: '运输中',  color: 'orange'     },
+  PARTIAL:    { label: '部分入库', color: 'gold'      },  // gold = 明显橙黄，Tag preset color
   RECEIVED:   { label: '已入库',  color: 'green'      },
   COMPLETED:  { label: '已完成',  color: 'green'      },
 };
@@ -220,6 +221,7 @@ const STATUS_MAP: Record<string, { label: string; color: string }> = {
 // 操作列：各阶段判断辅助集合
 const PENDING_STATUSES    = new Set(['PENDING']);
 const PURCHASING_STATUSES = new Set(['PLACED', 'PURCHASING', 'IN_TRANSIT']);
+const PARTIAL_STATUSES    = new Set(['PARTIAL']);                          // 部分入库，未完成
 const DONE_STATUSES       = new Set(['RECEIVED', 'COMPLETED']);
 
 const ALIBABA_STATUS_MAP: Record<string, { label: string; color: string }> = {
@@ -397,6 +399,22 @@ export default function ProcurementManagement() {
         message.error(res.message || '撤销失败，请重试');
       }
     } catch { message.error('网络异常，撤销失败，请重试'); }
+  }, [refresh]);
+
+  // 强行结单：PARTIAL → COMPLETED，跳过剩余未入库数量
+  const handleForceComplete = useCallback(async (orderId: number) => {
+    try {
+      const { data: res } = await request.post<{ code: number; message: string }>(
+        `/purchases/${orderId}/force-complete`,
+        {},
+      );
+      if (res.code === 200) {
+        message.success(res.message || '已强行结单，状态变更为"已完成"');
+        refresh();
+      } else {
+        message.error(res.message || '强行结单失败，请重试');
+      }
+    } catch { message.error('网络异常，强行结单失败，请重试'); }
   }, [refresh]);
 
   // 删除采购单：仅 PENDING 状态可用，关联产品回流产品库
@@ -589,9 +607,13 @@ export default function ProcurementManagement() {
       },
     },
     {
-      title: '状态', dataIndex: 'status', width: 100, align: 'center' as const,
+      title: '状态', dataIndex: 'status', width: 110, align: 'center' as const,
       render: (v: string) => {
-        const cfg = STATUS_MAP[v] ?? { label: v, color: 'default' };
+        // DEBUG：F12 Console 可看到实际 status 值，确认后端返回是否与期望一致
+        if (v === 'PARTIAL' || !STATUS_MAP[v]) {
+          console.log('[STATUS render] raw status value =', JSON.stringify(v));
+        }
+        const cfg = STATUS_MAP[v] ?? { label: v || '未知', color: 'default' };
         return <Tag color={cfg.color} bordered={false} style={{ fontWeight: 600, borderRadius: 6 }}>{cfg.label}</Tag>;
       },
     },
@@ -601,6 +623,7 @@ export default function ProcurementManagement() {
         const isSyncing  = batchSyncingId === record.id;
         const isPending  = PENDING_STATUSES.has(record.status);
         const isOrdering = PURCHASING_STATUSES.has(record.status);
+        const isPartial  = PARTIAL_STATUSES.has(record.status);
         const isDone     = DONE_STATUSES.has(record.status);
 
         return (
@@ -608,7 +631,6 @@ export default function ProcurementManagement() {
             {/* ── 待下单阶段 ─────────────────── */}
             {isPending && (
               <>
-                {/* 1688 自动下单（有映射数据时显示） */}
                 {record.has1688Items !== false && (
                   <Button
                     type="primary"
@@ -626,7 +648,6 @@ export default function ProcurementManagement() {
                     1688 下单
                   </Button>
                 )}
-                {/* 线下采购 */}
                 <Button
                   size="small"
                   icon={<ShoppingOutlined />}
@@ -643,7 +664,7 @@ export default function ProcurementManagement() {
               </>
             )}
 
-            {/* ── 采购中 / 运输中阶段 ─────────── */}
+            {/* ── 采购中 / 运输中阶段 → 首次入库 ─── */}
             {isOrdering && (
               <Button
                 type="primary"
@@ -655,10 +676,45 @@ export default function ProcurementManagement() {
               </Button>
             )}
 
-            {/* ── 已完成阶段（静态展示） ───────── */}
+            {/* ── 未完成（PARTIAL）→ 继续入库 + 标记完成 ── */}
+            {isPartial && (
+              <>
+                <Button
+                  type="primary"
+                  size="small"
+                  icon={<InboxOutlined />}
+                  onClick={() => setStockInTarget(record)}
+                  style={{ background: '#0ea5e9', borderColor: '#0ea5e9' }}
+                >
+                  继续入库
+                </Button>
+                <Popconfirm
+                  title="强行结单"
+                  description={
+                    <span style={{ maxWidth: 240, display: 'inline-block', lineHeight: 1.6 }}>
+                      将忽略剩余未入库数量，直接把此采购单标记为"已完成"。此操作不可撤销，请确认！
+                    </span>
+                  }
+                  okText="确认结单"
+                  cancelText="取消"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => handleForceComplete(record.id)}
+                >
+                  <Button
+                    size="small"
+                    icon={<CheckCircleOutlined />}
+                    danger
+                  >
+                    标记完成
+                  </Button>
+                </Popconfirm>
+              </>
+            )}
+
+            {/* ── 已完成阶段（只读） ───────── */}
             {isDone && (
               <span style={{ color: '#52c41a', fontSize: 12, fontWeight: 600 }}>
-                <CheckCircleOutlined style={{ marginRight: 4 }} />已入库
+                <CheckCircleOutlined style={{ marginRight: 4 }} />已完成
               </span>
             )}
 
@@ -766,9 +822,10 @@ export default function ProcurementManagement() {
           size="middle"
           style={{ padding: '0 20px', borderBottom: '1px solid #f0f0f0', marginBottom: 0 }}
           items={[
-            { key: 'ALL',        label: '全部' },
+            { key: 'ALL',        label: '全部'   },
             { key: 'PENDING',    label: '未下单' },
             { key: 'PURCHASING', label: '采购中' },
+            { key: 'PARTIAL',    label: <span style={{ color: '#d97706', fontWeight: 500 }}>未完成</span> },
             { key: 'COMPLETED',  label: '已完成' },
           ]}
         />
@@ -783,12 +840,18 @@ export default function ProcurementManagement() {
             {expandedRowKeys.length > 0 ? '收起全部明细' : '展开全部明细'}
           </Button>
           <Input.Search
-            placeholder="搜索主单号 / 1688订单号 / SKU"
+            placeholder="搜索主单号 / 1688订单号 / SKU / 物流单号"
             allowClear
             size="small"
             style={{ width: 280 }}
-            onSearch={handleSearch}
-            onChange={(e) => { if (!e.target.value) handleSearch(''); }}
+            value={keyword}
+            onSearch={(val) => handleSearch(val)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setKeyword(val);
+              // 清空时立即重置搜索（覆盖 allowClear 点 X 不触发 onSearch 的 bug）
+              if (!val) handleSearch('');
+            }}
           />
         </div>
 
@@ -804,6 +867,10 @@ export default function ProcurementManagement() {
             expandedRowRender,
             expandedRowKeys,
             onExpandedRowsChange: (keys) => setExpandedRowKeys(keys as (string | number)[]),
+            onExpand: (expanded) => {
+              // 每次有行展开时自增 refreshKey，强制子组件重新请求接口
+              if (expanded) setSubRefreshKey((k) => k + 1);
+            },
           }}
           pagination={{
             current: page, pageSize, total,
@@ -837,6 +904,7 @@ export default function ProcurementManagement() {
         onSuccess={() => {
           setStockInTarget(null);
           refresh();
+          setSubRefreshKey((k) => k + 1);
         }}
       />
 
@@ -1036,9 +1104,48 @@ function SpecSelectModal({ product, onCancel, onSuccess }: SpecSelectModalProps)
 // ─── 物流轨迹 Modal ────────────────────────────────────────────
 
 interface TraceNode {
-  time?: string | null;
-  desc?: string | null;
-  location?: string | null;
+  // 时间：兼容多种字段名
+  time?:        string | null;
+  timestamp?:   string | null;
+  datetime?:    string | null;
+  acceptTime?:  string | null;
+  accept_time?: string | null;
+  // 描述：兼容多种字段名
+  desc?:        string | null;
+  description?: string | null;
+  content?:     string | null;
+  remark?:      string | null;
+  acceptStation?: string | null;
+  accept_station?: string | null;
+  // 地点
+  location?:    string | null;
+  city?:        string | null;
+  area?:        string | null;
+}
+
+// 从后端响应中提取 TraceNode[]，兼容直接数组 / 各种嵌套结构
+function extractTraceNodes(data: unknown): TraceNode[] {
+  if (Array.isArray(data)) return data as TraceNode[];
+  if (data && typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    const candidate =
+      obj.nodes   ?? obj.list  ?? obj.items ??
+      obj.traces  ?? obj.data  ?? obj.result ??
+      obj.details ?? obj.track ?? obj.records;
+    if (Array.isArray(candidate)) return candidate as TraceNode[];
+  }
+  return [];
+}
+
+// 从 TraceNode 中统一读取时间、描述、地点
+function pickTraceTime(n: TraceNode): string {
+  return (n.time ?? n.timestamp ?? n.datetime ?? n.acceptTime ?? n.accept_time ?? '') as string;
+}
+function pickTraceDesc(n: TraceNode): string {
+  return (n.desc ?? n.description ?? n.content ?? n.remark ?? n.acceptStation ?? n.accept_station ?? '—') as string;
+}
+function pickTraceLocation(n: TraceNode): string {
+  return (n.location ?? n.city ?? n.area ?? '') as string;
 }
 
 interface LogisticsTraceModalProps {
@@ -1047,26 +1154,45 @@ interface LogisticsTraceModalProps {
 }
 
 function LogisticsTraceModal({ record, onCancel }: LogisticsTraceModalProps) {
-  const [nodes, setNodes]   = useState<TraceNode[]>([]);
+  const [nodes, setNodes]     = useState<TraceNode[]>([]);
   const [loading, setLoading] = useState(false);
+  const [errMsg, setErrMsg]   = useState<string | null>(null);
 
   useEffect(() => {
     if (!record) {
       setNodes([]);
+      setErrMsg(null);
       return;
     }
     let cancelled = false;
+    setNodes([]);
+    setErrMsg(null);
     setLoading(true);
     (async () => {
       try {
-        const { data: res } = await request.get<{ code: number; data?: TraceNode[]; message?: string }>(
+        const { data: res } = await request.get<{ code: number; data?: unknown; message?: string }>(
           `/purchases/${record.id}/logistics-trace`,
         );
-        if (!cancelled) {
-          setNodes(Array.isArray(res?.data) ? res.data : []);
+        if (cancelled) return;
+        if (!res || res.code !== 200) {
+          const hint = res?.message ?? `接口返回 code=${res?.code ?? 'N/A'}`;
+          setErrMsg(hint);
+          message.warning(`物流轨迹获取失败：${hint}`);
+          return;
         }
-      } catch {
-        if (!cancelled) setNodes([]);
+        const list = extractTraceNodes(res.data);
+        console.log(`[LogisticsTrace #${record.id}] nodes=`, list.length, list[0]);
+        setNodes(list);
+        if (list.length === 0) {
+          setErrMsg('接口正常返回，但暂无轨迹节点（货物可能尚未揽收）');
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const status = (err as { response?: { status?: number; data?: { message?: string } } })?.response;
+        const hint   = status?.data?.message ?? `HTTP ${status?.status ?? '网络错误'}`;
+        console.error(`[LogisticsTrace #${record.id}] 请求异常:`, err);
+        setErrMsg(hint);
+        message.error(`物流轨迹请求异常：${hint}`);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1105,8 +1231,8 @@ function LogisticsTraceModal({ record, onCancel }: LogisticsTraceModalProps) {
       )}
 
       {loading ? (
-        <div style={{ textAlign: 'center', padding: '32px 0' }}>
-          <Spin size="large" />
+        <div style={{ textAlign: 'center', padding: '48px 0' }}>
+          <Spin size="large" tip="正在查询物流轨迹..." />
         </div>
       ) : nodes.length > 0 ? (
         <Timeline
@@ -1117,16 +1243,16 @@ function LogisticsTraceModal({ record, onCancel }: LogisticsTraceModalProps) {
             children: (
               <div style={{ paddingBottom: 4 }}>
                 <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 2 }}>
-                  {node.time ?? ''}
-                  {node.location && (
+                  {pickTraceTime(node)}
+                  {pickTraceLocation(node) && (
                     <span style={{ marginLeft: 8, color: '#6b7280' }}>
                       <EnvironmentOutlined style={{ marginRight: 2, fontSize: 10 }} />
-                      {node.location}
+                      {pickTraceLocation(node)}
                     </span>
                   )}
                 </div>
                 <div style={{ fontSize: 13, color: i === 0 ? '#15803d' : '#374151', fontWeight: i === 0 ? 600 : 400 }}>
-                  {node.desc ?? '—'}
+                  {pickTraceDesc(node)}
                 </div>
               </div>
             ),
@@ -1135,7 +1261,11 @@ function LogisticsTraceModal({ record, onCancel }: LogisticsTraceModalProps) {
       ) : (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="暂无轨迹信息"
+          description={
+            errMsg
+              ? <span style={{ color: '#f59e0b', fontSize: 12 }}>{errMsg}</span>
+              : '暂无轨迹信息'
+          }
           style={{ padding: '32px 0' }}
         />
       )}
@@ -1332,13 +1462,45 @@ function OrderProductsTable({ orderId, refreshKey = 0, onOpenLogistics, onSyncSu
       setLoading(false);
       return;
     }
+    setProducts([]);   // 每次请求前强制清空，确保不显示旧数据
     setLoading(true);
     try {
-      const { data: res } = await request.get<{ code: number; data?: unknown[] }>(purchaseOrderProductsUrl(orderId));
-      const raw = Array.isArray(res?.data) ? res.data : [];
-      setProducts(raw.map((r) => normalizeOrderProduct(typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {})));
-    } catch { /* silent */ }
-    finally { setLoading(false); }
+      const { data: res } = await request.get<{ code: number; data?: unknown }>(purchaseOrderProductsUrl(orderId));
+
+      if (!res || res.code !== 200) {
+        console.warn(`[OrderProductsTable #${orderId}] 接口返回异常:`, res);
+        message.warning(`采购明细加载失败（code=${res?.code ?? 'N/A'}）`);
+        setProducts([]);
+        return;
+      }
+
+      // 兼容后端多种返回结构：直接数组 / { list } / { items } / { data } / { products }
+      const payload = res.data;
+      let rawList: unknown[];
+      if (Array.isArray(payload)) {
+        rawList = payload;
+      } else if (payload && typeof payload === 'object') {
+        const obj = payload as Record<string, unknown>;
+        rawList = (
+          Array.isArray(obj.list)     ? obj.list     :
+          Array.isArray(obj.items)    ? obj.items    :
+          Array.isArray(obj.data)     ? obj.data     :
+          Array.isArray(obj.products) ? obj.products :
+          []
+        );
+      } else {
+        rawList = [];
+      }
+
+      console.log(`[OrderProductsTable #${orderId}] rawList.length=`, rawList.length, rawList[0]);
+      setProducts(rawList.map((r) => normalizeOrderProduct(typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {})));
+    } catch (err) {
+      console.error(`[OrderProductsTable #${orderId}] 请求异常:`, err);
+      message.error('采购明细加载出错，请重试');
+      setProducts([]);
+    } finally {
+      setLoading(false);
+    }
   }, [orderId]);
 
   useEffect(() => {
@@ -2012,74 +2174,165 @@ function Place1688OrderModal({ record, onCancel, onSuccess }: Place1688OrderModa
   );
 }
 
-// ─── 确认入库弹窗 ───────────────────────────────────────────────
+// ─── 确认入库弹窗（实盘核对版）────────────────────────────────
 
 interface WarehouseOption {
   id:   number;
   name: string;
 }
 
+// 核对行：在 OrderProduct 基础上加已入库量（只读）+ 本次入库量（可编辑）
+interface ReceiveRow extends OrderProduct {
+  alreadyReceived:  number;   // 历次已入库数量（后端返回，只读）
+  receivedQuantity: number;   // 本次实际入库量（用户填写）
+}
+
 interface StockInModalProps {
   record:    PurchaseOrder | null;
   onCancel:  () => void;
   onSuccess: () => void;
+  /**
+   * 可选：上层已缓存的产品明细（如展开子表时已拉取过）。
+   * 当 /products 接口未返回 receivedQuantity 时，作为双保险兜底来源。
+   * 上层传入 undefined 时忽略，不影响现有逻辑。
+   */
+  prefetchedItems?: Array<{
+    id:                number;
+    receivedQuantity?: number | null;
+    received_quantity?: number | null;
+  }>;
 }
 
-function StockInModal({ record, onCancel, onSuccess }: StockInModalProps) {
-  const [form]       = Form.useForm<{ warehouseId: number }>();
+function StockInModal({ record, onCancel, onSuccess, prefetchedItems }: StockInModalProps) {
   const [warehouses,   setWarehouses]   = useState<WarehouseOption[]>([]);
   const [whLoading,    setWhLoading]    = useState(false);
+  const [warehouseId,  setWarehouseId]  = useState<number | undefined>(undefined);
+  const [rows,         setRows]         = useState<ReceiveRow[]>([]);
+  const [prodLoading,  setProdLoading]  = useState(false);
   const [submitting,   setSubmitting]   = useState(false);
 
-  // 每次弹窗打开时拉取仓库列表，并按优先级智能回显
+  // 从上层预传的明细数据构建 { productId → receivedQuantity } 兜底 Map
+  // 仅当值 > 0 时才写入，确保不会把"确实是 0"误覆盖成无效数据
+  const prefetchMap = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const item of prefetchedItems ?? []) {
+      const qty = Number(item.receivedQuantity ?? item.received_quantity ?? 0) || 0;
+      if (qty > 0) m.set(item.id, qty);
+    }
+    return m;
+  }, [prefetchedItems]);
+
+  // 弹窗打开时：并发拉取仓库列表 + 商品明细
   useEffect(() => {
-    if (!record) { form.resetFields(); return; }
-    form.resetFields();
+    if (!record) {
+      setRows([]);
+      setWarehouseId(undefined);
+      return;
+    }
+
+    // ★ 关键修复：立即用 record 上的仓库 ID 初始化 state，不等异步列表加载
+    //   这样即使仓库列表还在 loading，handleOk 也能拿到正确的 warehouseId
+    const boundWhId = record.warehouseId ?? record.warehouse?.id ?? undefined;
+    setWarehouseId(boundWhId ?? undefined);
+
+    // ── 拉仓库列表（仅为了显示仓库名称，不影响提交逻辑）────────
     setWhLoading(true);
     request.get<{ code: number; data: WarehouseOption[] | { list: WarehouseOption[] }; message: string }>(
       '/warehouses',
-    )
-      .then(({ data: res }) => {
-        if (res.code === 200) {
-          const list = Array.isArray(res.data)
-            ? res.data
-            : Array.isArray((res.data as { list: WarehouseOption[] }).list)
-              ? (res.data as { list: WarehouseOption[] }).list
-              : [];
-          setWarehouses(list);
-
-          /**
-           * 智能回显优先级：
-           *   1. record.warehouseId 存在（建单时已选过）→ 直接回显，用户可修改
-           *   2. 仓库只有一个 → 自动选中（无需用户操作）
-           *   3. 其余情况 → 留空，强制用户手动选择
-           */
-          if (record.warehouseId && list.some((w) => w.id === record.warehouseId)) {
-            form.setFieldValue('warehouseId', record.warehouseId);
-          } else if (list.length === 1) {
-            form.setFieldValue('warehouseId', list[0].id);
-          }
-          // 否则留空，form required 校验会阻止提交
-        } else {
-          message.warning(res.message || '获取仓库列表失败');
+    ).then(({ data: res }) => {
+      if (res.code === 200) {
+        const list = Array.isArray(res.data)
+          ? res.data
+          : Array.isArray((res.data as { list: WarehouseOption[] }).list)
+            ? (res.data as { list: WarehouseOption[] }).list
+            : [];
+        setWarehouses(list);
+        // 若 record 无绑定仓库，自动选唯一仓库
+        if (!boundWhId && list.length === 1) {
+          setWarehouseId(list[0].id);
         }
-      })
-      .catch(() => message.error('获取仓库列表失败，请检查网络'))
+      } else {
+        message.warning(res.message || '获取仓库列表失败');
+      }
+    }).catch(() => message.error('获取仓库列表失败'))
       .finally(() => setWhLoading(false));
-  }, [record, form]);
+
+    // ── 拉商品明细 ───────────────────────────────────────────
+    setProdLoading(true);
+    request.get<{ code: number; data?: unknown }>(
+      `/purchases/${record.id}/products`,
+    ).then(({ data: res }) => {
+      const payload = res?.data;
+      let rawList: unknown[];
+      if (Array.isArray(payload)) {
+        rawList = payload;
+      } else if (payload && typeof payload === 'object') {
+        const obj = payload as Record<string, unknown>;
+        rawList = Array.isArray(obj.list) ? obj.list
+          : Array.isArray(obj.items)      ? obj.items
+          : Array.isArray(obj.data)       ? obj.data
+          : Array.isArray(obj.products)   ? obj.products
+          : [];
+      } else {
+        rawList = [];
+      }
+      console.log('【入库弹窗】后端返回的原始明细数据(rawList):', rawList);
+      const products = rawList.map((r) => {
+        const raw = typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {};
+        const base = normalizeOrderProduct(raw);
+        // 第一优先：从 fetch 返回的原始字段中提取已入库数量（支持多种命名变体）
+        const alreadyFromFetch = Number(
+          raw.receivedQuantity ?? raw.received_quantity ??
+          raw.alreadyReceived  ?? raw.already_received  ??
+          raw.receivedQty      ?? raw.received_qty      ??
+          raw.stockInQty       ?? raw.stock_in_qty      ?? 0,
+        ) || 0;
+        // 第二保险：fetch 数据缺失（为 0）时，回退到上层预传的 prefetchMap
+        const already = alreadyFromFetch > 0
+          ? alreadyFromFetch
+          : (prefetchMap.get(Number(raw.id)) ?? 0);
+        console.log('【入库弹窗】单品原始字段:', raw, '→ fetchAlready:', alreadyFromFetch, '→ 最终 already:', already);
+        return { ...base, _alreadyReceived: already };
+      });
+      // 默认本次入库量 = max(0, 采购数量 - 历次已入库量)，防止多入库
+      setRows(products.map((p) => ({
+        ...p,
+        alreadyReceived:  p._alreadyReceived as number,
+        receivedQuantity: Math.max(0, (p.purchaseQuantity ?? 0) - (p._alreadyReceived as number)),
+      })));
+    }).catch(() => message.error('获取商品明细失败'))
+      .finally(() => setProdLoading(false));
+  }, [record]);
+
+  // 修改某行的实际入库量
+  const handleQtyChange = (productId: number, val: number | null) => {
+    setRows((prev) =>
+      prev.map((r) => r.id === productId ? { ...r, receivedQuantity: val ?? 0 } : r),
+    );
+  };
 
   const handleOk = async () => {
-    let values: { warehouseId: number };
-    try { values = await form.validateFields(); } catch { return; }
     if (!record) return;
+    // ★ 提交时优先从 record 直接取仓库 ID，state 作为次选（处理用户手动选择的情况）
+    const finalWhId = warehouseId ?? record.warehouseId ?? record.warehouse?.id;
+    if (!finalWhId) { message.warning('请先选择入库仓库'); return; }
+    if (rows.length === 0) { message.warning('当前采购单无商品明细，无法入库'); return; }
+
     setSubmitting(true);
     try {
       const { data: res } = await request.post<{ code: number; message: string }>(
         `/purchases/${record.id}/stock-in`,
-        { warehouseId: values.warehouseId },
+        {
+          warehouseId: finalWhId,
+          items: rows.map((r) => ({
+            productId:        r.id,
+            sku:              r.sku,
+            receivedQuantity: r.receivedQuantity,
+          })),
+        },
       );
       if (res.code === 200) {
-        message.success(res.message || '入库成功，库存已增加');
+        message.success(res.message || '入库成功，库存已更新');
         onSuccess();
       } else {
         message.error(res.message || '入库失败，请重试');
@@ -2088,12 +2341,90 @@ function StockInModal({ record, onCancel, onSuccess }: StockInModalProps) {
     finally { setSubmitting(false); }
   };
 
+  // 汇总：采购总数 vs 实际入库总数
+  const totalPurchased = rows.reduce((s, r) => s + (r.purchaseQuantity ?? 0), 0);
+  const totalReceived  = rows.reduce((s, r) => s + r.receivedQuantity, 0);
+  const hasShortage    = totalReceived < totalPurchased;
+
+  const receiveColumns: ColumnsType<ReceiveRow> = [
+    {
+      title: '图片', dataIndex: 'imageUrl', width: 52,
+      render: (url: string | null) => url
+        ? <Image src={url} width={36} height={36} style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }} preview={false} />
+        : <div style={{ width: 36, height: 36, borderRadius: 4, background: '#f5f5f5', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <ShoppingOutlined style={{ color: '#ccc', fontSize: 14 }} />
+          </div>,
+    },
+    {
+      title: 'SKU', dataIndex: 'sku', width: 130, ellipsis: true,
+      render: (v: string | null) => v
+        ? <span style={{ fontFamily: 'monospace', fontSize: 12, color: '#374151' }}>{v}</span>
+        : <span style={{ color: '#ccc' }}>—</span>,
+    },
+    {
+      title: '商品名称', dataIndex: 'chineseName', ellipsis: true,
+      render: (v: string | null) => v ?? <span style={{ color: '#ccc' }}>—</span>,
+    },
+    {
+      title: '采购数量', dataIndex: 'purchaseQuantity', width: 80, align: 'center' as const,
+      render: (v: number | null) => (
+        <span style={{ color: '#6b7280', fontSize: 13 }}>{v ?? 0}</span>
+      ),
+    },
+    {
+      // 历次已入库量（只读，后端返回）
+      title: (
+        <span>
+          已入库量
+          <span style={{ fontSize: 11, color: '#52c41a', fontWeight: 400, marginLeft: 4 }}>（历次）</span>
+        </span>
+      ),
+      dataIndex: 'alreadyReceived',
+      width: 100,
+      align: 'center' as const,
+      render: (v: number) => (
+        <span style={{ fontSize: 13, color: v > 0 ? '#15803d' : '#d1d5db', fontWeight: v > 0 ? 600 : 400 }}>
+          {v}
+        </span>
+      ),
+    },
+    {
+      // ★ 核心列：本次入库量，默认 = max(0, 采购量 - 已入库量)，允许修改
+      title: (
+        <span>
+          本次入库量
+          <span style={{ fontSize: 11, color: '#faad14', fontWeight: 400, marginLeft: 4 }}>（可改）</span>
+        </span>
+      ),
+      dataIndex: 'receivedQuantity',
+      width: 130,
+      align: 'center' as const,
+      render: (_: number, row: ReceiveRow) => {
+        const remaining = Math.max(0, (row.purchaseQuantity ?? 0) - row.alreadyReceived);
+        return (
+          <InputNumber
+            min={0}
+            max={remaining > 0 ? remaining : (row.purchaseQuantity ?? 9999)}
+            value={row.receivedQuantity}
+            onChange={(val) => handleQtyChange(row.id, val)}
+            size="small"
+            style={{ width: 90 }}
+            status={row.receivedQuantity < remaining ? 'warning' : undefined}
+          />
+        );
+      },
+    },
+  ];
+
   return (
     <Modal
       title={
         <span>
           <InboxOutlined style={{ color: '#52c41a', marginRight: 8 }} />
-          确认入库
+          确认入库 · 实盘核对
+          <span style={{ marginLeft: 10, fontSize: 12, color: '#64748b', fontWeight: 400 }}>
+            采购单：<span style={{ fontFamily: 'monospace' }}>{record?.orderNo}</span>
+          </span>
         </span>
       }
       open={!!record}
@@ -2103,60 +2434,67 @@ function StockInModal({ record, onCancel, onSuccess }: StockInModalProps) {
       okText="确认入库"
       cancelText="取消"
       okButtonProps={{ style: { background: '#52c41a', borderColor: '#52c41a' } }}
-      width={440}
+      width={720}
       destroyOnClose
       maskClosable={false}
     >
-      {/* 采购单信息摘要 */}
-      <div style={{ marginBottom: 16, padding: '10px 14px', background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 8, fontSize: 13 }}>
-        <span style={{ color: '#389e0d', fontWeight: 600 }}>
-          <CheckCircleOutlined style={{ marginRight: 6 }} />
-          即将入库
+      {/* 仓库选择 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <span style={{ fontSize: 13, color: '#374151', flexShrink: 0 }}>
+          入库仓库<span style={{ color: '#ff4d4f' }}>*</span>
         </span>
-        <span style={{ marginLeft: 8, color: '#555' }}>采购单：</span>
-        <span style={{ fontWeight: 600, fontFamily: 'monospace' }}>{record?.orderNo}</span>
+        <Select
+          style={{ width: 220 }}
+          placeholder={whLoading ? '加载中…' : '请选择入库仓库'}
+          loading={whLoading}
+          // 仅在"已绑定仓库"时禁用，加载中不禁用（防止死锁）
+          disabled={!!(record?.warehouseId || record?.warehouse?.id)}
+          value={warehouseId}
+          onChange={setWarehouseId}
+          optionFilterProp="label"
+          showSearch
+          notFoundContent={<div style={{ textAlign: 'center', color: '#999', padding: '8px 0', fontSize: 12 }}>暂无仓库，请先创建</div>}
+        >
+          {warehouses.map((wh) => (
+            <Select.Option key={wh.id} value={wh.id} label={wh.name}>{wh.name}</Select.Option>
+          ))}
+        </Select>
+        {(record?.warehouseId || record?.warehouse?.id) && (
+          <span style={{ fontSize: 11, color: '#52c41a' }}>（已绑定，不可更改）</span>
+        )}
       </div>
 
-      <Form form={form} layout="vertical" requiredMark="optional">
-        <Form.Item
-          label={
-            <span>
-              入库目标仓库
-              <span style={{ color: '#ff4d4f', marginLeft: 4 }}>*</span>
-              {(record?.warehouseId || record?.warehouse?.id)
-                ? <span style={{ marginLeft: 8, fontSize: 11, color: '#52c41a', fontWeight: 400 }}>（已确定，不可更改）</span>
-                : <span style={{ marginLeft: 8, fontSize: 11, color: '#faad14', fontWeight: 400 }}>（历史单据未指定仓库，请手动选择）</span>
-              }
-            </span>
-          }
-          name="warehouseId"
-          rules={[{ required: true, message: '必须选择入库仓库，不可跳过！' }]}
-        >
-          <Select
-            placeholder={whLoading ? '正在加载仓库列表…' : '请选择入库目标仓库'}
-            loading={whLoading}
-            // 已在主表选过仓库则禁止在此更改，保证仓库与采购单绑定一致性
-            disabled={whLoading || !!(record?.warehouseId || record?.warehouse?.id)}
-            style={{ width: '100%' }}
-            optionFilterProp="label"
-            showSearch
-            notFoundContent={
-              <div style={{ padding: '12px 0', textAlign: 'center', color: '#999', fontSize: 13 }}>
-                暂无可用仓库，请先在"仓库管理"中添加
-              </div>
-            }
-          >
-            {warehouses.map((wh) => (
-              <Select.Option key={wh.id} value={wh.id} label={wh.name}>
-                <span>{wh.name}</span>
-              </Select.Option>
-            ))}
-          </Select>
-        </Form.Item>
-      </Form>
+      {/* 商品实盘核对表格 */}
+      <Table<ReceiveRow>
+        rowKey="id"
+        dataSource={rows}
+        columns={receiveColumns}
+        loading={prodLoading}
+        pagination={false}
+        size="small"
+        scroll={{ y: 320, x: 'max-content' }}
+        locale={{ emptyText: prodLoading ? '加载商品明细中…' : '暂无商品明细' }}
+        style={{ marginBottom: 12 }}
+      />
 
-      <div style={{ color: '#888', fontSize: 12, marginTop: -8 }}>
-        确认后，该采购单下所有产品将按采购数量增加至所选仓库库存，状态变更为"已完成"。
+      {/* 底部汇总栏 */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '8px 12px', background: hasShortage ? '#fffbe6' : '#f6ffed',
+        border: `1px solid ${hasShortage ? '#ffe58f' : '#b7eb8f'}`, borderRadius: 8, fontSize: 13 }}>
+        <span style={{ color: '#6b7280' }}>
+          共 <b>{rows.length}</b> 个 SKU
+        </span>
+        <span>
+          采购总数：<b style={{ color: '#374151' }}>{totalPurchased}</b>
+          <span style={{ margin: '0 12px', color: '#d9d9d9' }}>|</span>
+          本次入库：
+          <b style={{ color: hasShortage ? '#d97706' : '#15803d', fontSize: 15 }}>{totalReceived}</b>
+          {hasShortage && (
+            <span style={{ marginLeft: 8, color: '#d97706', fontSize: 12 }}>
+              ⚠ 短少 {totalPurchased - totalReceived} 件，请确认
+            </span>
+          )}
+        </span>
       </div>
     </Modal>
   );
