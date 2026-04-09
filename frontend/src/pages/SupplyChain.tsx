@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  Table, Tag, Button, Tooltip, message, Empty, Image, Typography,
+  Table, Tag, Button, Tooltip, message, Empty, Image,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import {
@@ -8,8 +8,6 @@ import {
   LinkOutlined, ShoppingCartOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
-
-const { Text } = Typography;
 
 interface PurchasingProduct {
   id:               number;

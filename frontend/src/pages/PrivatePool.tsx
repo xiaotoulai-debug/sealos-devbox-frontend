@@ -7,7 +7,7 @@ import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface
 import {
   SearchOutlined, ShoppingOutlined, ReloadOutlined,
   StarFilled, LinkOutlined,
-  ExclamationCircleFilled, DeleteOutlined, SaveOutlined,
+  ExclamationCircleFilled, DeleteOutlined,
   RocketOutlined, CheckCircleOutlined, BarcodeOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';

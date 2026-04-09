@@ -345,7 +345,8 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
   const open = product !== null;
 
   useEffect(() => {
-    if (product) {
+    if (!product) return;
+    const tid = setTimeout(() => {
       setCnName('');
       setLen(null); setWid(null); setHei(null);
       setWeight(null); setCost(null); setFbe(null);
@@ -353,7 +354,7 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
       setPurchaseUrl('');
       setTranslatedTitle(null);
 
-      // 自动翻译标题
+      // 自动翻译标题（与表单重置同一次异步任务，避免在 effect 内同步 setState）
       if (product.title) {
         setTranslating(true);
         request.post<{ code: number; data: { translatedText: string }; message?: string }>(
@@ -372,7 +373,9 @@ function CollectModal({ product, onClose, onConfirm, confirming }: CollectModalP
           setTranslating(false);
         });
       }
-    }
+    }, 0);
+
+    return () => clearTimeout(tid);
   }, [product]);
 
   const price = product?.price ?? 0;
@@ -640,6 +643,7 @@ export default function PublicPool() {
   const [page,      setPage]      = useState(1);
   const [pageSize,  setPageSize]  = useState(15);
   const [total,     setTotal]     = useState(0);
+  const [importing, setImporting] = useState(false);
 
   const [allBrands,   setAllBrands]   = useState<string[]>([]);
   const [allTags,     setAllTags]     = useState<string[]>([]);
@@ -785,6 +789,18 @@ export default function PublicPool() {
 
   // ── 表格列 ───────────────────────────────────────────────
 
+  // 图片加载失败（如 OSS 迁移未完成导致外链 403）时展示的占位图
+  // 纯 SVG inline data URL，含图标轮廓 + "转存中" 文案，零依赖、零状态
+  const FALLBACK_IMG =
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E" +
+    "%3Crect fill='%23f7f7f7' width='56' height='56' rx='8'/%3E" +
+    "%3Crect x='16' y='11' width='24' height='20' rx='3' fill='none' stroke='%23d9d9d9' stroke-width='1.5'/%3E" +
+    "%3Cpolyline points='16,27 22,21 28,25 34,19 40,27' fill='none' stroke='%23d9d9d9' stroke-width='1.5'/%3E" +
+    "%3Ccircle cx='34' cy='17' r='2.5' fill='%23d9d9d9'/%3E" +
+    "%3Ctext x='28' y='46' font-size='7' fill='%23bfbfbf' text-anchor='middle' font-family='sans-serif'%3E" +
+    "%E8%BD%AC%E5%AD%98%E4%B8%AD" +
+    "%3C/text%3E%3C/svg%3E";
+
   const columns = useMemo<ColumnsType<Product>>(() => [
     {
       title: '图片', dataIndex: 'imageUrl', width: 80,
@@ -793,7 +809,7 @@ export default function PublicPool() {
           <Image src={url} width={56} height={56}
             style={{ objectFit: 'cover', borderRadius: 8, border: '1px solid #f0f0f0' }}
             preview={{ mask: <SearchOutlined style={{ fontSize: 14 }} /> }}
-            fallback="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56'%3E%3Crect fill='%23f5f5f5' width='56' height='56'/%3E%3C/svg%3E"
+            fallback={FALLBACK_IMG}
           />
         ) : (
           <div className="w-14 h-14 rounded-lg bg-gray-100 flex items-center justify-center">
@@ -972,19 +988,33 @@ export default function PublicPool() {
         <Space>
           <Button
             icon={<CloudUploadOutlined />}
+            disabled={importing}
             onClick={() => {
               Modal.confirm({
                 title: '导入本地 JSON 数据',
-                content: '将从服务器 data_uploads/public_sea_raw/ 目录读取所有 JSON 文件并导入公海产品池。已存在的产品（按 PNK 去重）会自动更新。',
+                content: (
+                  <div style={{ lineHeight: 1.8 }}>
+                    <p style={{ marginBottom: 8 }}>
+                      将从服务器 <code style={{ fontSize: 12 }}>data_uploads/public_sea_raw/</code> 目录读取 JSON 并导入公海产品池；已存在产品（按 PNK 去重）会更新。
+                    </p>
+                    <p style={{ marginBottom: 8 }}>
+                      <strong>点击「开始导入」后，文本数据更新约需 1–2 分钟，请耐心等待。</strong>
+                    </p>
+                    <p style={{ marginBottom: 0 }}>
+                      图片资源将在后端服务器异步迁移至 OSS，与本次弹窗完成时间无关，请勿反复点击导入。
+                    </p>
+                  </div>
+                ),
                 okText: '开始导入',
                 cancelText: '取消',
                 onOk: async () => {
-                  const hide = message.loading('正在导入公海产品数据，请稍候...', 0);
+                  const hide = message.loading('正在导入公海产品数据，文本写入约需 1–2 分钟，请稍候…', 0);
+                  setImporting(true);
                   try {
                     const { data: res } = await request.post<{
                       code: number; message: string;
                       data: { totalFiles: number; totalRecords: number; inserted: number; updated: number; skipped: number; errors: number };
-                    }>('/products/import-json');
+                    }>('/products/import-json', undefined, { timeout: 120_000 });
                     hide();
                     if (res.code === 200 && res.data) {
                       Modal.success({
@@ -996,6 +1026,9 @@ export default function PublicPool() {
                             <div>新增：<b style={{ color: '#52c41a' }}>{res.data.inserted.toLocaleString()}</b></div>
                             <div>更新：<b style={{ color: '#1890ff' }}>{res.data.updated.toLocaleString()}</b></div>
                             {res.data.errors > 0 && <div>错误：<b style={{ color: '#ff4d4f' }}>{res.data.errors}</b></div>}
+                            <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 13 }}>
+                              图片抓取正在后台进行中，请稍后刷新查看。
+                            </div>
                           </div>
                         ),
                       });
@@ -1006,6 +1039,8 @@ export default function PublicPool() {
                   } catch {
                     hide();
                     message.error('导入请求失败');
+                  } finally {
+                    setImporting(false);
                   }
                 },
               });

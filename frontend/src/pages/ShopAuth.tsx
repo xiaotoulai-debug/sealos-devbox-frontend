@@ -6,8 +6,8 @@ import {
 import type { ColumnsType } from 'antd/es/table/interface';
 import {
   PlusOutlined, SafetyCertificateOutlined, DeleteOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, ReloadOutlined,
-  LinkOutlined, ShopOutlined, ExclamationCircleOutlined, EditOutlined,
+  ReloadOutlined,
+  LinkOutlined, ShopOutlined, EditOutlined,
 } from '@ant-design/icons';
 import request from '../lib/request';
 
@@ -274,7 +274,12 @@ export default function ShopAuth() {
           error:   { color: 'warning', text: '异常' },
         };
         const s = map[v] ?? map.error;
-        return <Badge status={s.color as any} text={<span style={{ fontWeight: 500 }}>{s.text}</span>} />;
+        return (
+          <Badge
+            status={s.color as 'success' | 'processing' | 'default' | 'error' | 'warning'}
+            text={<span style={{ fontWeight: 500 }}>{s.text}</span>}
+          />
+        );
       },
     },
     {

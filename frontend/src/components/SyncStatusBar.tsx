@@ -47,9 +47,14 @@ export default function SyncStatusBar({ shopId }: SyncStatusBarProps) {
   }, [shopId]);
 
   useEffect(() => {
-    fetchStatus();
+    const tid = setTimeout(() => {
+      void fetchStatus();
+    }, 0);
     const timer = setInterval(fetchStatus, 10000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(tid);
+      clearInterval(timer);
+    };
   }, [fetchStatus]);
 
   if (!shopId) return null;

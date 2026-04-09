@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Table, Tag, Input, Button, Empty, Image, Tooltip, message,
-  Dropdown, Modal, Space, InputNumber, Divider, Upload,
+  Dropdown, Modal, Space, InputNumber, Upload,
   Form, Select,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
@@ -18,6 +18,8 @@ import { isSuperAdminUser } from '../lib/auth';
 import AlibabaMappingModal from '../components/AlibabaMappingModal';
 import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
 import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
+import BatchImportDimensionsModal from '../components/BatchImportDimensionsModal';
+import { MAX_EXCEL_IMPORT_ROWS, ExcelRowLimitExceededError, mergeDefinedPayloadFields } from '../utils/excelImport';
 
 interface WarehouseStock {
   warehouseId:         number;
@@ -90,6 +92,7 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
   const [repeatModalOpen,  setRepeatModalOpen]  = useState(false);
   const [createModalOpen,  setCreateModalOpen]  = useState(false);
   const [batchCreateOpen,  setBatchCreateOpen]  = useState(false);
+  const [batchImportDimOpen, setBatchImportDimOpen] = useState(false);
   const [editModalOpen,    setEditModalOpen]    = useState(false);
   const [editTarget,       setEditTarget]       = useState<InventoryProduct | null>(null);
   const [adjustStockOpen,  setAdjustStockOpen]  = useState(false);
@@ -267,6 +270,7 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
   const addExportItems: MenuProps['items'] = useMemo(() => [
     { key: 'create',       icon: <PlusOutlined />,         label: '➕ 手动创建 SKU',   onClick: () => setCreateModalOpen(true) },
     { key: 'batch-create', icon: <AppstoreAddOutlined />,  label: '🗂️ 批量创建 SKU',  onClick: () => setBatchCreateOpen(true) },
+    { key: 'batch-import-dim', icon: <UploadOutlined />, label: '📏 批量更新SKU', onClick: () => setBatchImportDimOpen(true) },
     { type: 'divider' as const },
     { key: 'export-sel',   icon: <ExportOutlined />,       label: '📤 导出勾选 SKU',   disabled: !hasSelected, onClick: handleExportSelected },
     { key: 'export-all',   icon: <GlobalOutlined />,       label: '🌐 导出全局 SKU',   onClick: handleExportAll },
@@ -714,6 +718,12 @@ export default function InventorySKU({ onNavigate, initialKeyword }: InventorySK
         open={batchCreateOpen}
         onCancel={() => setBatchCreateOpen(false)}
         onDone={() => { setBatchCreateOpen(false); refresh(); }}
+      />
+
+      <BatchImportDimensionsModal
+        open={batchImportDimOpen}
+        onCancel={() => setBatchImportDimOpen(false)}
+        onDone={() => refresh()}
       />
 
       <AlibabaMappingModal
@@ -1233,7 +1243,7 @@ function validateRows(rows: BatchCreateRow[]): BatchCreateRow[] {
     if (s) { skuSeen.set(s, [...(skuSeen.get(s) ?? []), i]); }
   });
 
-  return rows.map((r, idx) => {
+  return rows.map((r) => {
     const errs: string[] = [];
     if (!r.sku.trim()) errs.push('SKU 不能为空');
     const s = r.sku.trim().toUpperCase();
@@ -1266,6 +1276,10 @@ function parseExcelFile(file: File): Promise<BatchCreateRow[]> {
         const wb = XLSX.read(data, { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const jsonRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
+        if (jsonRows.length > MAX_EXCEL_IMPORT_ROWS) {
+          reject(new ExcelRowLimitExceededError());
+          return;
+        }
 
         const mapped: BatchCreateRow[] = jsonRows.map((r) => {
           const get = (keys: string[]) => {
@@ -1334,7 +1348,13 @@ function BatchCreateSKUModal({ open, onCancel, onDone }: BatchCreateSKUModalProp
       if (parsed.length === 0) { message.warning('Excel 中没有有效数据'); return; }
       setRows(validateRows(parsed));
       message.success(`已解析 ${parsed.length} 条数据`);
-    } catch { message.error('Excel 解析失败，请检查文件格式'); }
+    } catch (err) {
+      if (err instanceof ExcelRowLimitExceededError) {
+        Modal.error({ title: '行数超限', content: err.message });
+      } else {
+        message.error('Excel 解析失败，请检查文件格式');
+      }
+    }
   }, []);
 
   const handleSubmit = async () => {
@@ -1347,11 +1367,20 @@ function BatchCreateSKUModal({ open, onCancel, onDone }: BatchCreateSKUModalProp
     if (valid.length === 0) { message.warning('请至少填写一个 SKU'); return; }
     setSubmitting(true);
     try {
-      const items = valid.map((r) => ({
-        sku: r.sku.trim(), chineseName: r.chineseName.trim() || null,
-        purchaseUrl: r.purchaseUrl.trim() || null, imageUrl: r.imageUrl.trim() || null,
-        purchasePrice: r.purchasePrice, length: r.length, width: r.width, height: r.height, actualWeight: r.actualWeight,
-      }));
+      const items = valid.map((r) => {
+        const item: Record<string, unknown> = { sku: r.sku.trim() };
+        mergeDefinedPayloadFields(item, {
+          chineseName: r.chineseName,
+          purchaseUrl: r.purchaseUrl,
+          imageUrl: r.imageUrl,
+          purchasePrice: r.purchasePrice,
+          length: r.length,
+          width: r.width,
+          height: r.height,
+          actualWeight: r.actualWeight,
+        });
+        return item;
+      });
       const { data: res } = await request.post<{ code: number; message: string; data: { count: number; errors: string[] } }>(
         '/products/inventory-batch-create', { items },
       );
@@ -1583,7 +1612,6 @@ function BatchAdjustInventoryModal({ open, rows, onCancel, onDone }: BatchAdjust
           remark:    r.remark.trim() || undefined,
         })),
       };
-      console.log('Batch Adjust Payload:', payload);
       const { data: res } = await request.post<{ code: number; message: string }>(
         '/inventory/batch-adjust',
         payload,

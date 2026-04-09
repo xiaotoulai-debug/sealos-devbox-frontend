@@ -1,15 +1,16 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Spin, Alert, Dropdown, InputNumber,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Alert, Dropdown,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
-import { ReloadOutlined, AppstoreOutlined, CheckCircleOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { ReloadOutlined, AppstoreOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import request from '../lib/request';
 import ProductImage from '../components/ProductImage';
 import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
 import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
 import { CreateFbeShipmentModal } from './FbeShipments';
+import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/ProfitBreakdownPopover';
 
 const { Text } = Typography;
 
@@ -78,6 +79,17 @@ interface StoreProduct {
   localChineseName?: string | null;
   purchase_cost?: number | null;
   purchaseCost?: number | null;
+  // ── 后端预估毛利计算引擎字段（Prisma 小驼峰） ──
+  estimatedProfitLocal?: number | null;
+  estimated_profit?:     number | null;   // snake_case 别名兜底
+  estimatedProfitCny?:   number | null;
+  profitCalculatedAt?:   string | null;
+  commissionRate?:       number | null;
+  profitMarginPct?:      number | null;
+  profit_margin_pct?:    number | null;   // snake_case 别名兜底
+  // ── 毛利推演明细（后端预计算，含估算标记） ──
+  profit_breakdown?:     ProfitBreakdown | null;
+  profitBreakdown?:      ProfitBreakdown | null;
 }
 
 // 本地库存 SKU 信息（用于关联、毛利计算及采购计划）
@@ -233,7 +245,6 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         data?: StoreProduct[] | { list?: StoreProduct[]; total?: number; totalCount?: number; currency?: string };
         currency?: string;
       }>('/store-products', { params });
-      console.log('=== FRONTEND API RESP ===', res?.data);
       if (res.code === 200) {
         const raw = res.data;
         const list = Array.isArray(raw)
@@ -282,6 +293,11 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       setMapSearchLoading(false);
     }
   }, []);
+
+  // 纠偏成功后的刷新回调，传给 ProfitBreakdownPopover
+  const handleProfitCorrected = useCallback(() => {
+    fetchProducts(shopId, appliedKeyword, { page, pageSize, sortBy, sortOrder, mappingStatus });
+  }, [fetchProducts, shopId, appliedKeyword, page, pageSize, sortBy, sortOrder, mappingStatus]);
 
   const openMapModal = useCallback((product: StoreProduct) => {
     setMapTarget(product);
@@ -548,7 +564,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     });
   }, [selectedRows]);
 
-  const handleTableChange = useCallback((pagination: { current?: number; pageSize?: number }, _filters: unknown, sorter: unknown, extra?: { action?: 'paginate' | 'sort' | 'filter' }) => {
+  const handleTableChange = useCallback((pagination: { current?: number; pageSize?: number }, _filters: unknown, sorter: unknown) => {
     const newPage = pagination.current ?? 1;
     const newSize = pagination.pageSize ?? pageSize;
     const sizeChanged = newSize !== pageSize;
@@ -766,19 +782,34 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     {
       title: '预估毛利',
       key: 'profit',
-      width: 120,
+      width: 150,
       align: 'center',
       render: (_: unknown, r: StoreProduct) => {
-        const price = r.price ?? r.sale_price ?? r.salePrice;
-        const skuKey = String(r.sku ?? '').trim().toUpperCase();
-        const cost = inventoryMap[skuKey]?.purchasePrice;
-        if (price == null || cost == null) return <span style={{ color: '#94a3b8' }}>—</span>;
-        const profit = Number(price) - Number(cost);
-        const c = r.currency ?? '';
-        const num = profit.toFixed(2);
-        const suffix = (c ?? '').trim();
-        const color = profit >= 0 ? '#52c41a' : '#ff4d4f';
-        return <span style={{ fontWeight: 600, color, fontFeatureSettings: '"tnum"' }}>{suffix ? `${num} ${suffix}` : num}</span>;
+        // ── 显式萃取所有字段，避免字段名映射在子组件内隐式降级 ──
+        const skuKey       = String(r.sku ?? '').trim().toUpperCase();
+        const purchaseCost = inventoryMap[skuKey]?.purchasePrice ?? null;
+        // profit_breakdown 是后端返回的 snake_case 键名
+        const breakdown    = r.profit_breakdown ?? r.profitBreakdown ?? null;
+        // estimated_profit 是后端新引擎的 snake_case 字段；estimatedProfitLocal 为旧字段名兼容
+        const profitLocal  = r.estimatedProfitLocal ?? r.estimated_profit ?? null;
+        // CNY 毛利：优先从 breakdown 内读，其次读顶层字段
+        const profitCny    = breakdown?.profitCny ?? r.estimatedProfitCny ?? null;
+        // 毛利率：优先 breakdown，其次顶层（兼容 snake_case）
+        const marginPct    = breakdown?.profitMarginPct ?? r.profitMarginPct ?? r.profit_margin_pct ?? null;
+        const price        = r.price ?? r.sale_price ?? r.salePrice ?? null;
+        return (
+          <ProfitBreakdownPopover
+            pnk={r.pnk ?? r.part_number_key ?? ''}
+            breakdown={breakdown}
+            profitLocal={profitLocal}
+            profitCny={profitCny}
+            marginPct={marginPct}
+            price={price}
+            currency={currency}
+            purchaseCost={purchaseCost}
+            onCorrectionDone={handleProfitCorrected}
+          />
+        );
       },
     },
     {
@@ -851,7 +882,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         );
       },
     },
-  ], [inventoryMap, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder]);
+  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected]);
 
   return (
     <div>

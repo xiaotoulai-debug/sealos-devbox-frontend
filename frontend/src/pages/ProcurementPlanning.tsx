@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
-  Table, Tag, Button, Tooltip, message, Empty, Image, Typography, Space, Modal,
-  InputNumber, Input, Divider, Dropdown, Form, Select, Spin,
+  Table, Tag, Button, Tooltip, message, Empty, Image, Space, Modal,
+  InputNumber, Input, Dropdown, Form, Select, Spin,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table/interface';
 import type { MenuProps } from 'antd';
@@ -13,8 +13,6 @@ import {
 } from '@ant-design/icons';
 import request from '../lib/request';
 import AlibabaMappingModal from '../components/AlibabaMappingModal';
-
-const { Text } = Typography;
 
 interface PurchasingProduct {
   id:               number;
@@ -464,7 +462,7 @@ interface BatchOperationModalProps {
   onDone: () => void;
 }
 
-function BatchOperationModal({ open, rows, onCancel, onDone }: BatchOperationModalProps) {
+export function BatchOperationModal({ open, rows, onCancel, onDone }: BatchOperationModalProps) {
   const [editData,  setEditData]  = useState<EditableRow[]>([]);
   const [applying,  setApplying]  = useState(false);
   const [rolling,   setRolling]   = useState(false);

@@ -13,7 +13,7 @@ import type { ColumnsType } from 'antd/es/table';
 import request from '../lib/request';
 import { ALL_MENU_ITEMS, buildPermissionTree, collectGroupKeys } from '../lib/menuConfig';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const { TextArea } = Input;
 
 // ─── 类型 ─────────────────────────────────────────────────────

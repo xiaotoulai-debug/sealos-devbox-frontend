@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
 import {
-  ReloadOutlined, EyeOutlined, CheckCircleOutlined, InboxOutlined,
+  ReloadOutlined, EyeOutlined, InboxOutlined,
   ExclamationCircleFilled, SendOutlined, CloseCircleOutlined,
   WarningOutlined, ClockCircleOutlined, SyncOutlined, StopOutlined,
   PlusOutlined, DollarOutlined,

@@ -112,6 +112,33 @@ interface OrderProduct {
   externalSkuId?:       string | null;
 }
 
+/**
+ * 采购数量归一化：别名兼容、0 值保留（全程 ??，避免 || 吞掉 0）、字符串转数字。
+ * 兼容扁平字段 purchaseQuantity / purchase_quantity / quantity，以及嵌套 purchase.quantity、item.quantity。
+ */
+function normalizePurchaseQuantityField(raw: Record<string, unknown>): number | null {
+  const nestedQuantity = (obj: unknown): unknown => {
+    if (obj && typeof obj === 'object' && obj !== null && 'quantity' in obj) {
+      return (obj as Record<string, unknown>).quantity;
+    }
+    return undefined;
+  };
+
+  const flat =
+    raw.purchaseQuantity ??
+    raw.purchase_quantity ??
+    raw.quantity ??
+    nestedQuantity(raw.purchase) ??
+    nestedQuantity(raw.item);
+
+  if (flat === undefined || flat === null) return null;
+  if (typeof flat === 'string' && flat.trim() === '') return null;
+
+  const n = typeof flat === 'number' ? flat : Number(String(flat).trim());
+  if (Number.isNaN(n)) return null;
+  return n;
+}
+
 // 归一化：兼容后端返回 camelCase 或 snake_case
 function normalizeOrderProduct(raw: Record<string, unknown>): OrderProduct {
   return {
@@ -122,7 +149,7 @@ function normalizeOrderProduct(raw: Record<string, unknown>): OrderProduct {
     imageUrl: (raw.imageUrl ?? raw.image_url ?? null) as string | null,
     purchaseUrl: (raw.purchaseUrl ?? raw.purchase_url ?? null) as string | null,
     purchasePrice: (raw.purchasePrice ?? raw.purchase_price ?? null) as number | null,
-    purchaseQuantity: (raw.purchaseQuantity ?? raw.purchase_quantity ?? null) as number | null,
+    purchaseQuantity: normalizePurchaseQuantityField(raw),
     price: (raw.price ?? null) as number | null,
     externalOrderId: (raw.externalOrderId ?? raw.external_order_id ?? raw.alibabaOrderId ?? raw.alibaba_order_id ?? null) as string | null | undefined,
     alibabaOrderStatus: (raw.alibabaOrderStatus ?? raw.alibaba_order_status ?? null) as string | null | undefined,
@@ -304,7 +331,7 @@ export default function ProcurementManagement() {
         setWarehouseOptions(list);
       }
     }).catch(() => { /* 静默，StockInModal 内会单独重试 */ });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Tab 切换：直接传入新 key，绕过 state 闭包延迟，确保请求立即携带最新 tabStatus
   const handleTabChange = useCallback((key: string) => {

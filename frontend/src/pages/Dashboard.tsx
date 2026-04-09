@@ -24,14 +24,12 @@ import {
   Segmented, Table,
 } from 'antd';
 import {
-  TeamOutlined,
   LogoutOutlined,
   UserOutlined,
   ShoppingCartOutlined,
   BellOutlined,
   ClockCircleOutlined,
   DownOutlined,
-  SettingOutlined,
   RollbackOutlined,
   TrophyOutlined,
   LineChartOutlined,
@@ -49,7 +47,7 @@ import {
 } from 'recharts';
 
 const { Sider, Header, Content } = Layout;
-const { Title, Text } = Typography;
+const { Title } = Typography;
 
 // 数字跳动动画样式
 const statPopStyle = `
@@ -410,7 +408,7 @@ export default function Dashboard() {
 
   // ── 仪表盘数据（全部来自单次 global-stats 请求）────────────
   const [stats, setStats] = useState<DashboardStatsData | null>(null);
-  const [trendData, setTrendData] = useState<TrendDayItem[]>([]);
+  const [, setTrendData] = useState<TrendDayItem[]>([]);
   const [shopSeriesData, setShopSeriesData] = useState<Record<number, { day: string; order_count: number; sales_amount: number }[]>>({});
   const [globalLoading, setGlobalLoading] = useState(true);
 
