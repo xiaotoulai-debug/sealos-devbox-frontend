@@ -1,0 +1,41 @@
+# ===== 依赖与构建产物（绝对不入库）=====
+node_modules/
+dist/
+dist-ssr/
+build/
+
+# ===== 环境变量与密钥（最高优先级保护）=====
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+.env.*.local
+# 仅允许提交"示例"环境变量文件（内容不含真实密钥）
+!.env.example
+
+# ===== 日志文件 =====
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== 编辑器与系统文件 =====
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ===== TypeScript 编译缓存 =====
+*.tsbuildinfo
+
+# ===== 测试覆盖率 =====
+coverage/
