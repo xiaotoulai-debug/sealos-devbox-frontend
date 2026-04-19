@@ -1391,17 +1391,6 @@ function ManualCreateFbeShipmentModal({
               render: (_: unknown, r: ManualLineRow) => {
                 // 二次兜底：预提取失败时从完整原始对象再查一次
                 const imgSrc = r.imageUrl ?? pickImageUrl(r.rawProduct) ?? '';
-                // 调试：开发阶段可在控制台确认图片字段结构
-                console.log('[FBE建单] 行图片数据 →', {
-                  productId: r.productId, sku: r.sku,
-                  imageUrl_cached: r.imageUrl,
-                  imageUrl_refetch: pickImageUrl(r.rawProduct),
-                  raw_keys: r.rawProduct ? Object.keys(r.rawProduct) : [],
-                  raw_image: r.rawProduct?.image,
-                  raw_images: r.rawProduct?.images,
-                  raw_imageUrl: r.rawProduct?.imageUrl,
-                  raw_main_image: r.rawProduct?.main_image,
-                });
                 return (
                   <Image
                     src={imgSrc}

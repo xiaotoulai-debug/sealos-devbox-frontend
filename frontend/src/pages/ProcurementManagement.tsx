@@ -166,24 +166,6 @@ function normalizeOrderProduct(raw: Record<string, unknown>): OrderProduct {
 // ─── PurchaseOrder 归一化 ─────────────────────────────────────
 // fetchOrders 拿到原始 JSON 后立即过此函数，统一字段命名，兼容后端 camelCase/snake_case 混用
 function normalizePurchaseOrder(raw: Record<string, unknown>): PurchaseOrder {
-  // ── DEBUG：在控制台打印原始数据，确认后端实际字段名 ──────────────
-  // 生产稳定后可删除此行
-  if (raw.id) {
-    const logFields = Object.keys(raw).filter((k) =>
-      k.toLowerCase().includes('logistic') ||
-      k.toLowerCase().includes('tracking') ||
-      k.toLowerCase().includes('bill') ||
-      k.toLowerCase().includes('waybill') ||
-      k.toLowerCase().includes('company') ||
-      k.toLowerCase().includes('shipment'),
-    );
-    if (logFields.length) {
-      console.log(`[PurchaseOrder #${raw.id}] 物流相关字段:`, Object.fromEntries(logFields.map((k) => [k, raw[k]])));
-    } else {
-      console.log(`[PurchaseOrder #${raw.id}] ⚠ 未发现任何物流字段。原始 keys:`, Object.keys(raw));
-    }
-  }
-
   // ── 尝试从嵌套 logistics 对象中读取（兼容后端嵌套结构）──────────
   const nested = (raw.logistics ?? raw.logisticsInfo ?? raw.logistic ?? null) as Record<string, unknown> | null;
 
@@ -636,10 +618,6 @@ export default function ProcurementManagement() {
     {
       title: '状态', dataIndex: 'status', width: 110, align: 'center' as const,
       render: (v: string) => {
-        // DEBUG：F12 Console 可看到实际 status 值，确认后端返回是否与期望一致
-        if (v === 'PARTIAL' || !STATUS_MAP[v]) {
-          console.log('[STATUS render] raw status value =', JSON.stringify(v));
-        }
         const cfg = STATUS_MAP[v] ?? { label: v || '未知', color: 'default' };
         return <Tag color={cfg.color} bordered={false} style={{ fontWeight: 600, borderRadius: 6 }}>{cfg.label}</Tag>;
       },
@@ -987,8 +965,6 @@ function SpecSelectModal({ product, onCancel, onSuccess }: SpecSelectModalProps)
           message?: string;
         }>('/alibaba/product-specs', { params: { offerId } });
 
-        console.log('Specs received:', res.data);
-
         // 兼容三种后端返回结构：直接数组 / { list } / { items }
         let list: AlibabaSpec[] = [];
         if (Array.isArray(res.data)) {
@@ -1020,7 +996,6 @@ function SpecSelectModal({ product, onCancel, onSuccess }: SpecSelectModalProps)
     if (!product || !selectedSpec) return;
     setSaving(true);
     try {
-      console.log('[quick-map] PATCH', `/products/${product.id}/quick-map`, { externalSkuId: selectedSpec });
       const { data: res } = await request.patch<{ code: number; message?: string }>(
         `/products/${product.id}/quick-map`,
         { externalSkuId: selectedSpec },
@@ -1208,7 +1183,6 @@ function LogisticsTraceModal({ record, onCancel }: LogisticsTraceModalProps) {
           return;
         }
         const list = extractTraceNodes(res.data);
-        console.log(`[LogisticsTrace #${record.id}] nodes=`, list.length, list[0]);
         setNodes(list);
         if (list.length === 0) {
           setErrMsg('接口正常返回，但暂无轨迹节点（货物可能尚未揽收）');
@@ -1495,7 +1469,6 @@ function OrderProductsTable({ orderId, refreshKey = 0, onOpenLogistics, onSyncSu
       const { data: res } = await request.get<{ code: number; data?: unknown }>(purchaseOrderProductsUrl(orderId));
 
       if (!res || res.code !== 200) {
-        console.warn(`[OrderProductsTable #${orderId}] 接口返回异常:`, res);
         message.warning(`采购明细加载失败（code=${res?.code ?? 'N/A'}）`);
         setProducts([]);
         return;
@@ -1519,7 +1492,6 @@ function OrderProductsTable({ orderId, refreshKey = 0, onOpenLogistics, onSyncSu
         rawList = [];
       }
 
-      console.log(`[OrderProductsTable #${orderId}] rawList.length=`, rawList.length, rawList[0]);
       setProducts(rawList.map((r) => normalizeOrderProduct(typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {})));
     } catch (err) {
       console.error(`[OrderProductsTable #${orderId}] 请求异常:`, err);
@@ -2303,7 +2275,6 @@ function StockInModal({ record, onCancel, onSuccess, prefetchedItems }: StockInM
       } else {
         rawList = [];
       }
-      console.log('【入库弹窗】后端返回的原始明细数据(rawList):', rawList);
       const products = rawList.map((r) => {
         const raw = typeof r === 'object' && r != null ? (r as Record<string, unknown>) : {};
         const base = normalizeOrderProduct(raw);
@@ -2318,7 +2289,6 @@ function StockInModal({ record, onCancel, onSuccess, prefetchedItems }: StockInM
         const already = alreadyFromFetch > 0
           ? alreadyFromFetch
           : (prefetchMap.get(Number(raw.id)) ?? 0);
-        console.log('【入库弹窗】单品原始字段:', raw, '→ fetchAlready:', alreadyFromFetch, '→ 最终 already:', already);
         return { ...base, _alreadyReceived: already };
       });
       // 默认本次入库量 = max(0, 采购数量 - 历次已入库量)，防止多入库

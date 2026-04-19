@@ -125,6 +125,19 @@ interface Order {
 
 type ShopRecord = { id: number; shopName: string; platform: string; region?: string | null; site?: string | null };
 
+/**
+ * 解析 GET /orders 返回的 data：兼容直接数组、{ list }、{ items }（与后端 DTO 演进对齐）
+ */
+function extractOrdersListFromResponseData(raw: unknown): Order[] {
+  if (Array.isArray(raw)) return raw as Order[];
+  if (raw && typeof raw === 'object') {
+    const o = raw as { list?: unknown; items?: unknown };
+    if (Array.isArray(o.list)) return o.list as Order[];
+    if (Array.isArray(o.items)) return o.items as Order[];
+  }
+  return [];
+}
+
 // ─── 展开行：买家信息 + 商品明细 ────────────────────────────────
 
 function ExpandedOrderRow({ record, currency }: { record: Order; currency: string }) {
@@ -369,7 +382,7 @@ export default function PlatformOrders() {
 
       const { data: res } = await request.get<{
         code: number;
-        data: Order[] | { list: Order[]; total?: number };
+        data: Order[] | { list?: Order[]; items?: Order[]; total?: number };
         total?: number;
         isSyncing?: boolean;
         is_syncing?: boolean;
@@ -379,10 +392,9 @@ export default function PlatformOrders() {
 
       if (res.code === 200) {
         const raw      = res.data;
-        const list     = Array.isArray(raw) ? raw : (raw && Array.isArray((raw as { list?: Order[] }).list) ? (raw as { list: Order[] }).list : []);
+        const list     = extractOrdersListFromResponseData(raw);
         const totalVal = (res as { total?: number }).total ?? (raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { total?: number }).total : undefined);
         if ((totalVal ?? 0) > 0 && list.length === 0) {
-          console.warn('[平台订单] 分页断档：总数', totalVal, '但当前页返回空数组，尝试重新请求第一页');
           setPage(1);
           setTimeout(() => fetchOrders(sids, 1, ps, { cacheBust: true }), 300);
           return;
@@ -620,6 +632,14 @@ export default function PlatformOrders() {
   // 用 void 消除 shopIdForSync 的 no-used-vars 警告（保留字段备用）
   void shopIdForSync;
 
+  /** 无可用 shopId 时不展示「暂无订单」，避免与接口无数据混淆 */
+  const ordersTableEmptyDescription =
+    effectiveShopIds.length === 0
+      ? (!selectedShopName
+        ? '请先选择店铺'
+        : '请先在上方选择店铺与站点；当前筛选下没有可查询的店铺，请调整站点或重新选择店铺。')
+      : '暂无订单';
+
   return (
     <div>
       {/* ── 页头 ── */}
@@ -798,7 +818,7 @@ export default function PlatformOrders() {
             pageSizeOptions: ['20', '50', '100', '200'],
             showTotal:       (t) => `共 ${t} 条`,
           }}
-          locale={{ emptyText: <Empty description={selectedShopName ? '暂无订单' : '请先选择店铺'} style={{ padding: 48 }} /> }}
+          locale={{ emptyText: <Empty description={ordersTableEmptyDescription} style={{ padding: 48 }} /> }}
           // ★ 核心：主子表展开配置
           expandable={{
             expandedRowKeys,

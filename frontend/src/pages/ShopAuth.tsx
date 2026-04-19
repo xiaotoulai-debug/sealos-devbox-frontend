@@ -429,8 +429,6 @@ function AddShopModal({ open, editRecord, onCancel, onDone }: AddShopModalProps)
         payload.supplierId = fields.supplierId || undefined;
       }
       if (isEdit && editRecord?.id) {
-        const url = `/api/shops/${editRecord.id}`;
-        console.log('Sending Update Request to:', url, 'Method: PUT', 'Data:', payload);
         const { data: res } = await request.put<{ code: number; message?: string }>(`/shops/${editRecord.id}`, payload);
         if (res.code === 200) {
           message.success('更新成功');
