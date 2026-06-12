@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
-  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Alert, Dropdown,
+  Table, Button, Space, Empty, Typography, Select, message, Tooltip, Modal, Input, Tag, Alert, Dropdown, Popover,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table/interface';
 import { ReloadOutlined, AppstoreOutlined, LinkOutlined, SearchOutlined, DownloadOutlined, ToolOutlined, SettingOutlined, FileTextOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
@@ -15,10 +15,304 @@ import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/Prof
 const { Text } = Typography;
 
 // ─── 平台产品（已上架店铺产品）───────────────────────────────────
+type ProductClass =
+  | 'all'
+  | 'NEW'
+  | 'HOT'
+  | 'POTENTIAL'
+  | 'NORMAL'
+  | 'CLEARANCE';
+
+type ProductClassValue = Exclude<ProductClass, 'all'>;
+type LegacyProductClassValue =
+  | 'OUT_OF_STOCK_WATCH'
+  | 'DEAD'
+  | 'TO_BE_ELIMINATED';
+type ProductClassTagValue = ProductClassValue | LegacyProductClassValue;
+
+type StockStatusValue =
+  | 'OUT_OF_STOCK'
+  | 'LOW_STOCK'
+  | 'WARNING'
+  | 'SAFE'
+  | 'OVERSTOCK';
+
+type OperationPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+type OperationAction =
+  | 'RAISE_PRICE'
+  | 'LOWER_PRICE'
+  | 'JOIN_CAMPAIGN'
+  | 'ADVERTISE'
+  | 'CLEARANCE'
+  | 'PAUSE_PURCHASE'
+  | 'WAIT_FOR_ARRIVAL'
+  | 'OBSERVE';
+
+type BuyBoxGroupFilter = 'ALL' | 'WON' | 'NOT_WON' | 'UNKNOWN';
+type LinkTypeFilter = 'ALL' | 'SELF_BUILT' | 'RESELL' | 'OWN_BRAND_RESELL' | 'UNKNOWN';
+type StockGroupFilter = 'ALL' | 'STOCK_OK' | 'REPLENISH_WARNING' | 'OUT_OF_STOCK_REPLENISHED' | 'OUT_OF_STOCK_NOT_REPLENISHED';
+
+interface FetchProductsOptions {
+  refreshSales?: boolean;
+  page?: number;
+  pageSize?: number;
+  sortBy?: string | null;
+  sortOrder?: 'ascend' | 'descend' | null;
+  mappingStatus?: 'all' | 'mapped' | 'unmapped';
+  productClass?: ProductClass;
+  buyBoxGroup?: BuyBoxGroupFilter;
+  linkType?: LinkTypeFilter;
+  stockGroup?: StockGroupFilter;
+}
+
+type ClassificationSummary = Partial<Record<ProductClassValue | LegacyProductClassValue | 'total', number>>;
+
+interface StoreOverview {
+  productStructure?: ClassificationSummary | null;
+  product_structure?: ClassificationSummary | null;
+  generatedAt?: string | null;
+  generated_at?: string | null;
+}
+
+type OverviewCard<T extends string> = {
+  value: T;
+  title: string;
+  description: string;
+};
+
+type ActionTipLevel = 'danger' | 'warning' | 'primary' | 'default';
+
+interface ProductClassActionTip {
+  text: string;
+  level: ActionTipLevel;
+}
+
+interface OperationAdvice {
+  priority?: OperationPriority;
+  action?: OperationAction;
+  title?: string;
+  reason?: string;
+  tags?: string[];
+  metrics?: Record<string, unknown>;
+}
+
+const BUY_BOX_FILTER_OPTIONS = [
+  { value: 'ALL', label: '全部' },
+  { value: 'WON', label: '购物车已抢到' },
+  { value: 'NOT_WON', label: '未获得购物车' },
+  { value: 'UNKNOWN', label: '购物车未知' },
+] satisfies { value: BuyBoxGroupFilter; label: string }[];
+
+const LINK_TYPE_FILTER_OPTIONS = [
+  { value: 'ALL', label: '全部' },
+  { value: 'SELF_BUILT', label: '自建链接' },
+  { value: 'RESELL', label: '跟卖链接' },
+  { value: 'OWN_BRAND_RESELL', label: '自有品牌跟卖' },
+  { value: 'UNKNOWN', label: '待确认' },
+] satisfies { value: LinkTypeFilter; label: string }[];
+
+const STOCK_GROUP_FILTER_OPTIONS = [
+  { value: 'ALL', label: '全部' },
+  { value: 'STOCK_OK', label: '库存充足' },
+  { value: 'REPLENISH_WARNING', label: '补货预警' },
+  { value: 'OUT_OF_STOCK_REPLENISHED', label: '缺货已补' },
+  { value: 'OUT_OF_STOCK_NOT_REPLENISHED', label: '断货未补' },
+] satisfies { value: StockGroupFilter; label: string }[];
+
+const renderFilterEntryLabel = (entryLabel: string) => (props: { value?: string | number; label?: React.ReactNode }) => {
+  if (props.value === 'ALL') return entryLabel;
+  return props.label;
+};
+
+const PRODUCT_STRUCTURE_CARDS = [
+  {
+    value: 'all',
+    title: '全部产品',
+    description: '当前店铺同步到系统的全部平台产品',
+  },
+  {
+    value: 'NEW',
+    title: '新品',
+    description: '首次上架或处于新品观察阶段的产品',
+  },
+  {
+    value: 'HOT',
+    title: '主推款',
+    description: '当前卖得好，或历史有销量但当前断货',
+  },
+  {
+    value: 'POTENTIAL',
+    title: '成长款',
+    description: '近期开始动销，有继续观察价值',
+  },
+  {
+    value: 'NORMAL',
+    title: '常规款',
+    description: '表现稳定，正常维护',
+  },
+  {
+    value: 'CLEARANCE',
+    title: '清理款',
+    description: '有库存但长期卖不动，需要清理',
+  },
+] satisfies { value: ProductClass; title: string; description: string }[];
+
+const PRODUCT_CLASS_ACTION_TIPS = {
+  all: [
+    { text: '优先查看低库存', level: 'warning' },
+    { text: '检查未关联SKU', level: 'primary' },
+    { text: '处理负毛利产品', level: 'danger' },
+    { text: '补充缺失图片', level: 'default' },
+    { text: '关注无销量库存', level: 'warning' },
+  ],
+  HOT: [
+    { text: '库存较低', level: 'warning' },
+    { text: '紧急补货', level: 'danger' },
+    { text: '适度提价', level: 'warning' },
+    { text: '加大广告', level: 'primary' },
+    { text: '保持排名', level: 'default' },
+  ],
+  NEW: [
+    { text: '优先补货入仓', level: 'primary' },
+    { text: '观察首周动销', level: 'warning' },
+    { text: '完善listing资料', level: 'default' },
+    { text: '控制首批备货', level: 'warning' },
+    { text: '跟踪可售时间', level: 'primary' },
+  ],
+  POTENTIAL: [
+    { text: '加广告测试', level: 'primary' },
+    { text: '小批量补货', level: 'warning' },
+    { text: '观察转化率', level: 'default' },
+    { text: '优化主图文案', level: 'primary' },
+    { text: '提高曝光', level: 'warning' },
+  ],
+  NORMAL: [
+    { text: '保持价格', level: 'default' },
+    { text: '正常维护', level: 'primary' },
+    { text: '检查库存', level: 'warning' },
+    { text: '补齐资料', level: 'default' },
+    { text: '观察波动', level: 'default' },
+  ],
+  CLEARANCE: [
+    { text: '降价清仓', level: 'danger' },
+    { text: '停止采购', level: 'danger' },
+    { text: '组合促销', level: 'warning' },
+    { text: '检查滞销原因', level: 'primary' },
+    { text: '减少库存占用', level: 'warning' },
+  ],
+} as const satisfies Record<ProductClass, readonly ProductClassActionTip[]>;
+
+const ACTION_TIP_LEVEL_STYLE = {
+  danger: { color: '#dc2626', background: '#fef2f2', borderColor: '#fecaca' },
+  warning: { color: '#d97706', background: '#fff7ed', borderColor: '#fed7aa' },
+  primary: { color: '#2563eb', background: '#eff6ff', borderColor: '#bfdbfe' },
+  default: { color: '#475569', background: '#f8fafc', borderColor: '#e2e8f0' },
+} as const satisfies Record<ActionTipLevel, React.CSSProperties>;
+
+const LINK_TYPE_LABEL_MAP = {
+  SELF_BUILT: '自建链接',
+  RESELL: '跟卖链接',
+  OWN_BRAND_RESELL: '自有品牌跟卖',
+  UNKNOWN: '待确认',
+} as const;
+
+const LINK_TAG_STYLE_MAP = {
+  selfBuilt: { color: '#0891b2', background: '#ecfeff', borderColor: '#a5f3fc' },
+  resell: { color: '#d97706', background: '#fff7ed', borderColor: '#fed7aa' },
+  ownBrandResell: { color: '#7c3aed', background: '#f5f3ff', borderColor: '#ddd6fe' },
+  brand: { color: '#475569', background: '#f1f5f9', borderColor: '#cbd5e1' },
+  buyBoxWon: { color: '#15803d', background: '#f0fdf4', borderColor: '#bbf7d0' },
+  buyBoxLost: { color: '#dc2626', background: '#fef2f2', borderColor: '#fecaca' },
+  default: { color: '#64748b', background: '#f8fafc', borderColor: '#e2e8f0' },
+} as const satisfies Record<string, React.CSSProperties>;
+
+const PRODUCT_CLASS_TAG_MAP = {
+  HOT: { color: 'orange', label: '主推款' },
+  POTENTIAL: { color: 'geekblue', label: '成长款' },
+  NORMAL: { color: 'default', label: '常规款' },
+  CLEARANCE: { color: 'red', label: '清理款' },
+  NEW: { color: 'green', label: '新品' },
+  OUT_OF_STOCK_WATCH: { color: 'orange', label: '主推款' },
+  DEAD: { color: 'red', label: '清理款' },
+  TO_BE_ELIMINATED: { color: 'red', label: '清理款' },
+} as const satisfies Record<ProductClassTagValue, { color: string; label: string }>;
+
+const STOCK_STATUS_TAG_MAP = {
+  OUT_OF_STOCK: { color: 'red', label: '缺货' },
+  LOW_STOCK: { color: 'orange', label: '低库存' },
+  WARNING: { color: 'gold', label: '补货预警' },
+  SAFE: { color: 'green', label: '库存充足' },
+  OVERSTOCK: { color: 'blue', label: '库存偏多' },
+} as const satisfies Record<StockStatusValue, { color: string; label: string }>;
+
+const OPERATION_PRIORITY_MAP = {
+  P0: { color: 'red', label: 'P0' },
+  P1: { color: 'orange', label: 'P1' },
+  P2: { color: 'blue', label: 'P2' },
+  P3: { color: 'default', label: 'P3' },
+} as const satisfies Record<OperationPriority, { color: string; label: string }>;
+
+const OPERATION_ACTION_LABEL_MAP = {
+  RAISE_PRICE: '建议涨价',
+  LOWER_PRICE: '建议降价',
+  JOIN_CAMPAIGN: '参加活动',
+  ADVERTISE: '加广告',
+  CLEARANCE: '清仓处理',
+  PAUSE_PURCHASE: '暂停采购',
+  WAIT_FOR_ARRIVAL: '等待到货',
+  OBSERVE: '观察即可',
+} as const satisfies Record<OperationAction, string>;
+
+const OPERATION_ACTION_SHORT_LABEL_MAP = {
+  RAISE_PRICE: '建议涨价',
+  LOWER_PRICE: '建议降价',
+  JOIN_CAMPAIGN: '参加活动',
+  ADVERTISE: '加广告',
+  CLEARANCE: '清仓处理',
+  PAUSE_PURCHASE: '暂停采购',
+  WAIT_FOR_ARRIVAL: '等待到货',
+  OBSERVE: '观察即可',
+} as const satisfies Record<OperationAction, string>;
+
+interface PurchaseSuggestionData {
+  dailySales?: number | null;
+  targetStock?: number | null;
+  platformStock?: number | null;
+  platformInTransit?: number | null;
+  inTransitStock?: number | null;
+  localStock?: number | null;
+  purchasingStock?: number | null;
+  purchasingInTransit?: number | null;
+  planningStock?: number | null;
+  suggestAmount?: number | null;
+  targetStockDays?: number | null;
+  target_stock_days?: number | null;
+  platformStockDays?: number | null;
+  platform_stock_days?: number | null;
+  totalCoverageDays?: number | null;
+  total_coverage_days?: number | null;
+  coverageStock?: number | null;
+  coverage_stock?: number | null;
+  newProductStage?: string | null;
+  new_product_stage?: string | null;
+  newProductStageLabel?: string | null;
+  new_product_stage_label?: string | null;
+  firstAvailableAt?: string | null;
+  first_available_at?: string | null;
+  inventoryTag?: ProductClassValue | LegacyProductClassValue | string;
+  text?: string | null;
+  label?: string | null;
+  reason?: string | null;
+}
+
 interface StoreProduct {
   id: number;
   pnk?: string | null;
   sku?: string | null;
+  /** 后端修正后的真实卖家 SKU（eMAG vendorSku 字段），优先展示 */
+  vendorSku?: string | null;
+  vendor_sku?: string | null;
   ean?: string | null;
   part_number_key?: string | null;
   part_number?: string | null;
@@ -62,6 +356,12 @@ interface StoreProduct {
   sales30d?: number | null;
   sales_30d?: number | null;
   comprehensive_sales?: number | null;
+  stockStatus?: string | null;
+  stock_status?: string | null;
+  stockDays?: number | null;
+  stock_days?: number | null;
+  stockDailySales?: number | null;
+  stock_daily_sales?: number | null;
   validation_status?: number;
   status?: string;
   rejection_reason?: string | null;
@@ -90,6 +390,52 @@ interface StoreProduct {
   // ── 毛利推演明细（后端预计算，含估算标记） ──
   profit_breakdown?:     ProfitBreakdown | null;
   profitBreakdown?:      ProfitBreakdown | null;
+  productClass?:         string | null;
+  product_class?:        string | null;
+  productClassLabel?:    string | null;
+  product_class_label?:  string | null;
+  classificationReason?: string | null;
+  classification_reason?: string | null;
+  classificationMetrics?: unknown;
+  classification_metrics?: unknown;
+  brand?: string | null;
+  product_brand?: string | null;
+  platformBrand?: string | null;
+  platform_brand?: string | null;
+  linkType?: string | null;
+  link_type?: string | null;
+  linkTypeLabel?: string | null;
+  link_type_label?: string | null;
+  contentPermission?: string | null;
+  content_permission?: string | null;
+  contentPermissionLabel?: string | null;
+  content_permission_label?: string | null;
+  offerCompetitionType?: string | null;
+  offer_competition_type?: string | null;
+  offerCompetitionLabel?: string | null;
+  offer_competition_label?: string | null;
+  numberOfOffers?: number | null;
+  number_of_offers?: number | null;
+  buyBoxStatus?: string | null;
+  buy_box_status?: string | null;
+  buyBoxStatusLabel?: string | null;
+  buy_box_status_label?: string | null;
+  buyBoxStatusSource?: string | null;
+  buy_box_status_source?: string | null;
+  buyBoxStatusConfidence?: string | null;
+  buy_box_status_confidence?: string | null;
+  buyBoxRank?: number | null;
+  buy_box_rank?: number | null;
+  buyBoxActionTips?: string[] | string | null;
+  buy_box_action_tips?: string[] | string | null;
+  buyBoxMeta?: unknown;
+  buy_box_meta?: unknown;
+  purchaseSuggestion?:   PurchaseSuggestionData | null;
+  purchase_suggestion?:  PurchaseSuggestionData | null;
+  operationAdvice?:      OperationAdvice | null;
+  operation_advice?:     OperationAdvice | null;
+  __dedupeHiddenCount?:  number;
+  __dedupeHiddenPnks?:   string[];
 }
 
 // 本地库存 SKU 信息（用于关联、毛利计算及采购计划）
@@ -115,6 +461,340 @@ interface PlatformProductsProps {
   initialShopId?: number;
 }
 
+function getMappedInventorySku(product: StoreProduct): string {
+  return String(product.mapped_inventory_sku ?? product.inventorySku ?? product.inventory_sku ?? '').trim();
+}
+
+function getPlatformProductPnk(product: StoreProduct): string {
+  return String(product.pnk ?? product.part_number_key ?? product.partNumber ?? product.part_number ?? '').trim();
+}
+
+function getPlatformProductDedupeKey(product: StoreProduct): string {
+  const ean = String(product.ean ?? '').trim();
+  if (ean) return `EAN:${ean.toUpperCase()}`;
+
+  const sku = String(product.vendorSku ?? product.vendor_sku ?? product.sku ?? '').trim();
+  if (sku) return `SKU:${sku.toUpperCase()}`;
+
+  return `ID:${product.id}`;
+}
+
+function attachHiddenProductInfo(visible: StoreProduct, hidden: StoreProduct): StoreProduct {
+  const hiddenPnks = new Set<string>(visible.__dedupeHiddenPnks ?? []);
+  for (const pnk of hidden.__dedupeHiddenPnks ?? []) {
+    if (pnk) hiddenPnks.add(pnk);
+  }
+  const hiddenPnk = getPlatformProductPnk(hidden);
+  if (hiddenPnk) hiddenPnks.add(hiddenPnk);
+
+  return {
+    ...visible,
+    __dedupeHiddenCount: (visible.__dedupeHiddenCount ?? 0) + 1 + (hidden.__dedupeHiddenCount ?? 0),
+    __dedupeHiddenPnks: Array.from(hiddenPnks),
+  };
+}
+
+function dedupePlatformProductsByEan(list: StoreProduct[]): { list: StoreProduct[]; filteredCount: number } {
+  const map = new Map<string, StoreProduct>();
+  let filteredCount = 0;
+
+  list.forEach((item) => {
+    const key = getPlatformProductDedupeKey(item);
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, { ...item, __dedupeHiddenCount: 0, __dedupeHiddenPnks: [] });
+      return;
+    }
+
+    filteredCount += 1;
+    const existingMapped = !!getMappedInventorySku(existing);
+    const currentMapped = !!getMappedInventorySku(item);
+
+    if (!existingMapped && currentMapped) {
+      map.set(key, attachHiddenProductInfo({ ...item, __dedupeHiddenCount: 0, __dedupeHiddenPnks: [] }, existing));
+    } else {
+      map.set(key, attachHiddenProductInfo(existing, item));
+    }
+  });
+
+  return { list: Array.from(map.values()), filteredCount };
+}
+
+function renderOverviewCards<T extends string>({
+  cards,
+  getCount,
+  activeValue,
+  onCardClick,
+}: {
+  cards: readonly OverviewCard<T>[];
+  getCount: (value: T) => number | undefined;
+  activeValue?: T;
+  onCardClick?: (value: T) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        flexWrap: 'nowrap',
+        overflowX: 'auto',
+        paddingBottom: 2,
+      }}
+    >
+      {cards.map((card) => {
+        const clickable = !!onCardClick;
+        const active = activeValue === card.value;
+        const count = getCount(card.value);
+        const displayCount = typeof count === 'number' ? count : '-';
+        return (
+          <button
+            key={card.value}
+            type="button"
+            onClick={clickable ? () => onCardClick(card.value) : undefined}
+            style={{
+              flex: '0 0 96px',
+              width: 96,
+              minHeight: 48,
+              padding: '5px 8px',
+              textAlign: 'left',
+              background: active ? '#eff6ff' : '#fff',
+              border: `1px solid ${active ? '#2563eb' : '#e5e7eb'}`,
+              borderRadius: 10,
+              cursor: clickable ? 'pointer' : 'default',
+              boxShadow: active ? '0 4px 12px rgba(37, 99, 235, 0.12)' : 'none',
+              transition: 'border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease',
+            }}
+            onMouseEnter={(e) => {
+              if (clickable && !active) e.currentTarget.style.borderColor = '#93c5fd';
+            }}
+            onMouseLeave={(e) => {
+              if (clickable && !active) e.currentTarget.style.borderColor = '#e5e7eb';
+            }}
+          >
+            <div style={{ color: active ? '#1d4ed8' : '#1e293b', fontSize: 12, fontWeight: 600, marginBottom: 1, lineHeight: 1.2 }}>
+              {card.title}
+            </div>
+            <div style={{ color: '#111827', fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>
+              {displayCount}
+            </div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function renderProductClassActionTips(value: ProductClass) {
+  const tips = PRODUCT_CLASS_ACTION_TIPS[value] ?? PRODUCT_CLASS_ACTION_TIPS.all;
+
+  return (
+    <div
+      style={{
+        flex: '1 1 320px',
+        minWidth: 280,
+        minHeight: 72,
+        padding: '10px 12px',
+        border: '1px solid #e5e7eb',
+        borderRadius: 12,
+        background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <span style={{ color: '#1e293b', fontSize: 13, fontWeight: 700 }}>当前分类建议</span>
+        <span style={{ color: '#94a3b8', fontSize: 12 }}>根据所选产品结构，优先处理以下动作</span>
+      </div>
+      <Space size={[6, 6]} wrap>
+        {tips.map((tip) => (
+          <Tag
+            key={`${value}-${tip.text}`}
+            style={{
+              ...ACTION_TIP_LEVEL_STYLE[tip.level],
+              marginInlineEnd: 0,
+              borderRadius: 999,
+              fontSize: 12,
+              lineHeight: '22px',
+              paddingInline: 9,
+              fontWeight: tip.level === 'danger' ? 700 : 600,
+            }}
+          >
+            {tip.text}
+          </Tag>
+        ))}
+      </Space>
+    </div>
+  );
+}
+
+function normalizeEnumValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getExplicitLabel(label: unknown): string | null {
+  return typeof label === 'string' && label.trim() ? label.trim() : null;
+}
+
+function resolveProductBrand(record: StoreProduct): string | null {
+  const raw = record.brand ?? record.product_brand ?? record.platformBrand ?? record.platform_brand;
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  return text || null;
+}
+
+function getLinkTypeTagStyle(linkType: string): React.CSSProperties {
+  if (linkType === 'SELF_BUILT') return LINK_TAG_STYLE_MAP.selfBuilt;
+  if (linkType === 'RESELL') return LINK_TAG_STYLE_MAP.resell;
+  if (linkType === 'OWN_BRAND_RESELL') return LINK_TAG_STYLE_MAP.ownBrandResell;
+  return LINK_TAG_STYLE_MAP.default;
+}
+
+function renderCompactInfoTag(label: string, style: React.CSSProperties) {
+  return (
+    <Tag
+      key={label}
+      style={{
+        ...style,
+        margin: 0,
+        borderRadius: 999,
+        fontSize: 11,
+        lineHeight: '20px',
+        paddingInline: 7,
+        fontWeight: 600,
+      }}
+    >
+      {label}
+    </Tag>
+  );
+}
+
+function getBuyBoxDisplayTag(record: StoreProduct): { label: string; style: React.CSSProperties } {
+  const status = normalizeEnumValue(record.buyBoxStatus ?? record.buy_box_status);
+
+  if (status === 'WON') {
+    return { label: '购物车已抢到', style: LINK_TAG_STYLE_MAP.buyBoxWon };
+  }
+
+  if (status === 'LOST' || status === 'NO_ACTIVE_BUYBOX' || status === 'POSSIBLY_LOST') {
+    return { label: '未获得购物车', style: LINK_TAG_STYLE_MAP.buyBoxLost };
+  }
+
+  return { label: '购物车未知', style: LINK_TAG_STYLE_MAP.default };
+}
+
+function renderLinkTypeTags(record: StoreProduct) {
+  const tags: React.ReactNode[] = [];
+
+  const linkType = normalizeEnumValue(record.linkType ?? record.link_type);
+  const linkTypeLabel = getExplicitLabel(record.linkTypeLabel ?? record.link_type_label)
+    ?? LINK_TYPE_LABEL_MAP[linkType as keyof typeof LINK_TYPE_LABEL_MAP]
+    ?? null;
+  if (linkTypeLabel) {
+    tags.push(renderCompactInfoTag(linkTypeLabel, getLinkTypeTagStyle(linkType)));
+  }
+
+  const brand = resolveProductBrand(record);
+  if (brand) {
+    tags.push(renderCompactInfoTag(`品牌：${brand}`, LINK_TAG_STYLE_MAP.brand));
+  }
+
+  const buyBoxTag = getBuyBoxDisplayTag(record);
+  tags.push(renderCompactInfoTag(buyBoxTag.label, buyBoxTag.style));
+
+  if (tags.length === 0) return null;
+  return tags;
+}
+
+function formatMetricValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null;
+  if (typeof value === 'string') return value.trim() || null;
+  if (typeof value === 'boolean') return value ? '是' : '否';
+  return null;
+}
+
+function formatTargetStockDays(value: unknown): string {
+  if (value == null || Number.isNaN(Number(value))) return '-';
+  return `${Number(value)} 天`;
+}
+
+function formatDecimalDays(value: unknown): string {
+  if (value == null || Number.isNaN(Number(value))) return '-';
+  return `${Number(value).toFixed(1)} 天`;
+}
+
+function formatFirstAvailableAt(value: unknown): string {
+  if (value == null) return '-';
+  const text = String(value).trim();
+  if (!text) return '-';
+  const match = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : text;
+}
+
+function getPurchaseSuggestion(record: StoreProduct): PurchaseSuggestionData | null {
+  return record.purchaseSuggestion ?? record.purchase_suggestion ?? null;
+}
+
+function getProductClassDisplay(
+  record: StoreProduct,
+): { classKey: string; color: string; label: string } | null {
+  const rawProductClass = record.productClass ?? record.product_class ?? null;
+  const classKey = typeof rawProductClass === 'string' ? rawProductClass.trim().toUpperCase() : '';
+  if (!classKey) return null;
+
+  const backendLabel = getExplicitLabel(record.productClassLabel ?? record.product_class_label);
+  const classConfig = PRODUCT_CLASS_TAG_MAP[classKey as ProductClassTagValue];
+  if (backendLabel) {
+    return { classKey, color: classConfig?.color ?? 'default', label: backendLabel };
+  }
+  if (classConfig) {
+    return { classKey, color: classConfig.color, label: classConfig.label };
+  }
+  return { classKey, color: 'default', label: '未知分类' };
+}
+
+function getNewProductStageLabel(record: StoreProduct): string | null {
+  const suggestion = getPurchaseSuggestion(record);
+  if (!suggestion) return null;
+  return getExplicitLabel(suggestion.newProductStageLabel ?? suggestion.new_product_stage_label);
+}
+
+function getProductClassCount(summary: ClassificationSummary | null | undefined, value: ProductClass): number | undefined {
+  if (!summary) return undefined;
+  if (value === 'all') return typeof summary.total === 'number' ? summary.total : undefined;
+
+  if (value === 'NEW') {
+    return typeof summary.NEW === 'number' ? summary.NEW : 0;
+  }
+
+  const direct = summary[value];
+  if (typeof direct === 'number') return direct;
+
+  if (value === 'CLEARANCE') {
+    const dead = typeof summary.DEAD === 'number' ? summary.DEAD : 0;
+    const toBeEliminated = typeof summary.TO_BE_ELIMINATED === 'number' ? summary.TO_BE_ELIMINATED : 0;
+    const legacyTotal = dead + toBeEliminated;
+    return legacyTotal > 0 ? legacyTotal : undefined;
+  }
+
+  return undefined;
+}
+
+function getOperationAdviceLabels(operationAdvice: OperationAdvice): { fullLabel: string; shortLabel: string } {
+  const title = operationAdvice.title?.trim();
+  const action = operationAdvice.action;
+  const actionLabel = action ? OPERATION_ACTION_LABEL_MAP[action] : undefined;
+  const shortActionLabel = action ? OPERATION_ACTION_SHORT_LABEL_MAP[action] : undefined;
+  const fullLabel = title || actionLabel || '未知动作';
+
+  if (title?.includes('负毛利') && action === 'RAISE_PRICE') {
+    return { fullLabel, shortLabel: '负毛利调价' };
+  }
+
+  if (title && title.length <= 6 && !/[，,。；;]/.test(title)) {
+    return { fullLabel, shortLabel: title };
+  }
+
+  return { fullLabel, shortLabel: shortActionLabel || fullLabel };
+}
+
 export default function PlatformProducts({ initialSearch, initialShopId }: PlatformProductsProps) {
   const [loading, setLoading] = useState(false);
   const [products, setProducts] = useState<StoreProduct[]>([]);
@@ -124,6 +804,18 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const [currency, setCurrency] = useState<string>('');
   const [searchKeyword, setSearchKeyword] = useState(initialSearch ?? '');
   const [appliedKeyword, setAppliedKeyword] = useState(initialSearch ?? ''); // 实际已应用的搜索关键词
+  const [productClass, setProductClass] = useState<ProductClass>('all');
+  const [classificationSummary, setClassificationSummary] = useState<ClassificationSummary | null>(null);
+  const [storeOverview, setStoreOverview] = useState<StoreOverview | null>(null);
+  const [buyBoxGroup, setBuyBoxGroup] = useState<BuyBoxGroupFilter>('ALL');
+  const [linkTypeFilter, setLinkTypeFilter] = useState<LinkTypeFilter>('ALL');
+  const [stockGroup, setStockGroup] = useState<StockGroupFilter>('ALL');
+  const buyBoxGroupRef = useRef<BuyBoxGroupFilter>('ALL');
+  const linkTypeFilterRef = useRef<LinkTypeFilter>('ALL');
+  const stockGroupRef = useRef<StockGroupFilter>('ALL');
+  buyBoxGroupRef.current = buyBoxGroup;
+  linkTypeFilterRef.current = linkTypeFilter;
+  stockGroupRef.current = stockGroup;
   // 关联状态筛选：'all' | 'mapped' | 'unmapped'
   const [mappingStatus, setMappingStatus] = useState<'all' | 'mapped' | 'unmapped'>('all');
 
@@ -151,6 +843,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [totalCount, setTotalCount] = useState(0);
+  const [dedupeFilteredCount, setDedupeFilteredCount] = useState(0);
   // 服务端排序状态
   const [sortBy, setSortBy] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<'ascend' | 'descend' | null>(null);
@@ -191,6 +884,48 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     }
   }, []);
 
+  const fetchClassificationSummary = useCallback(async (sid: number | null) => {
+    if (sid == null) {
+      setClassificationSummary(null);
+      return;
+    }
+    try {
+      const { data: res } = await request.get<
+        ClassificationSummary | { code?: number; data?: ClassificationSummary | null }
+      >('/store-products/classification-summary', { params: { shopId: sid } });
+      const payload = res && typeof res === 'object' && 'data' in res
+        ? (res as { code?: number; data?: ClassificationSummary | null }).data
+        : (res as ClassificationSummary);
+      setClassificationSummary(payload && typeof payload === 'object' ? payload : null);
+    } catch {
+      setClassificationSummary(null);
+    }
+  }, []);
+
+  const fetchStoreOverview = useCallback(async (sid: number | null) => {
+    if (sid == null) {
+      setStoreOverview(null);
+      return;
+    }
+    try {
+      const { data: res } = await request.get<
+        StoreOverview | { code?: number; data?: StoreOverview | null }
+      >('/store-products/store-overview', { params: { shopId: sid } });
+      const payload = res && typeof res === 'object' && 'data' in res
+        ? (res as { code?: number; data?: StoreOverview | null }).data
+        : (res as StoreOverview);
+      setStoreOverview(payload && typeof payload === 'object'
+        ? {
+          ...payload,
+          productStructure: payload.productStructure ?? payload.product_structure ?? null,
+          generatedAt: payload.generatedAt ?? payload.generated_at ?? null,
+        }
+        : null);
+    } catch {
+      setStoreOverview(null);
+    }
+  }, []);
+
   const fetchShops = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
     try {
@@ -214,10 +949,11 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     }
   }, [initialShopId]);
 
-  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: { refreshSales?: boolean; page?: number; pageSize?: number; sortBy?: string | null; sortOrder?: 'ascend' | 'descend' | null; mappingStatus?: 'all' | 'mapped' | 'unmapped' }) => {
+  const fetchProducts = useCallback(async (sid: number | null, keyword?: string, opts?: FetchProductsOptions) => {
     if (sid == null) {
       setProducts([]);
       setTotalCount(0);
+      setDedupeFilteredCount(0);
       return;
     }
     const token = localStorage.getItem('token');
@@ -236,10 +972,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       if (opts?.sortBy) params.sortBy = opts.sortBy;
       if (opts?.sortOrder) params.sortOrder = opts.sortOrder;
       if (opts?.mappingStatus && opts.mappingStatus !== 'all') params.mappingStatus = opts.mappingStatus;
-      if (opts?.refreshSales) {
-        params.refreshSales = 1;
-        params._t = Date.now();
-      }
+      if (opts?.productClass && opts.productClass !== 'all') params.productClass = opts.productClass;
+      const effectiveBuyBoxGroup = opts?.buyBoxGroup ?? buyBoxGroupRef.current;
+      const effectiveLinkType = opts?.linkType ?? linkTypeFilterRef.current;
+      const effectiveStockGroup = opts?.stockGroup ?? stockGroupRef.current;
+      if (effectiveBuyBoxGroup !== 'ALL') params.buyBoxGroup = effectiveBuyBoxGroup;
+      if (effectiveLinkType !== 'ALL') params.linkType = effectiveLinkType;
+      if (effectiveStockGroup !== 'ALL') params.stockGroup = effectiveStockGroup;
+      if (opts?.refreshSales) params.refreshSales = 1;
+      params._t = Date.now();
       const { data: res } = await request.get<{
         code: number;
         data?: StoreProduct[] | { list?: StoreProduct[]; total?: number; totalCount?: number; currency?: string };
@@ -254,18 +995,22 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             : [];
         const dataObj = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as { total?: number; totalCount?: number; currency?: string } : null;
         const backendTotal = (typeof dataObj?.total === 'number' ? dataObj.total : typeof dataObj?.totalCount === 'number' ? dataObj.totalCount : 0) || 0;
-        setProducts([...list]);
+        const deduped = dedupePlatformProductsByEan(list);
+        setProducts(deduped.list);
         setTotalCount(backendTotal);
-        prevProductsCountRef.current = list.length;
+        setDedupeFilteredCount(deduped.filteredCount);
+        prevProductsCountRef.current = deduped.list.length;
         const c = (res as { currency?: string }).currency ?? dataObj?.currency ?? (list[0] as StoreProduct | undefined)?.currency ?? '';
         setCurrency((c ?? '').trim() || '');
       } else {
         setProducts([]);
         setTotalCount(0);
+        setDedupeFilteredCount(0);
       }
     } catch (err) {
       setProducts([]);
       setTotalCount(0);
+      setDedupeFilteredCount(0);
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status !== 401) {
         message.error('加载平台产品失败');
@@ -296,8 +1041,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
 
   // 纠偏成功后的刷新回调，传给 ProfitBreakdownPopover
   const handleProfitCorrected = useCallback(() => {
-    fetchProducts(shopId, appliedKeyword, { page, pageSize, sortBy, sortOrder, mappingStatus });
-  }, [fetchProducts, shopId, appliedKeyword, page, pageSize, sortBy, sortOrder, mappingStatus]);
+    fetchProducts(shopId, appliedKeyword, {
+      page,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+    });
+  }, [fetchProducts, shopId, appliedKeyword, page, pageSize, sortBy, sortOrder, mappingStatus, productClass]);
 
   const openMapModal = useCallback((product: StoreProduct) => {
     setMapTarget(product);
@@ -336,7 +1088,16 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       if (res.code === 200) {
         setPendingUpdateCount(0);
         setPage(1);
-        await fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+        await fetchProducts(shopId, appliedKeyword, {
+          page: 1,
+          pageSize,
+          sortBy,
+          sortOrder,
+          mappingStatus,
+          productClass,
+                });
+        await fetchClassificationSummary(shopId);
+        await fetchStoreOverview(shopId);
         message.success('同步成功');
       } else {
         message.error(res.message ?? '网络异常');
@@ -352,7 +1113,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     } finally {
       setSyncUrlsLoading(false);
     }
-  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts, fetchClassificationSummary, fetchStoreOverview]);
 
   const handleSyncProducts = useCallback(async () => {
     const selectedShopIds = shopId != null ? [shopId] : [];
@@ -389,10 +1150,20 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       if (shopId) {
         setPendingUpdateCount(0);
         setPage(1);
-        fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+        fetchProducts(shopId, appliedKeyword, {
+          refreshSales: true,
+          page: 1,
+          pageSize,
+          sortBy,
+          sortOrder,
+          mappingStatus,
+          productClass,
+                });
+        fetchClassificationSummary(shopId);
+        fetchStoreOverview(shopId);
       }
     }
-  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts, fetchClassificationSummary, fetchStoreOverview]);
 
   const handlePasteSubmit = useCallback(async () => {
     if (!pasteTarget || !shopId) return;
@@ -417,7 +1188,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         message.success('图片已保存');
         closePasteModal();
         setPage(1);
-        fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+        fetchProducts(shopId, appliedKeyword, {
+          page: 1,
+          pageSize,
+          sortBy,
+          sortOrder,
+          mappingStatus,
+          productClass,
+                });
       } else {
         message.error(res.message ?? '保存失败');
       }
@@ -427,7 +1205,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     } finally {
       setPasteSubmitting(false);
     }
-  }, [pasteTarget, pasteUrl, shopId, appliedKeyword, pageSize, sortBy, sortOrder, closePasteModal, fetchProducts]);
+  }, [pasteTarget, pasteUrl, shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, closePasteModal, fetchProducts]);
 
   const handleMapConfirm = useCallback(async () => {
     if (!mapTarget || !mapSelected || !shopId) return;
@@ -454,7 +1232,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       closeMapModal();
       fetchInventory();
       setPage(1);
-      fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+      fetchProducts(shopId, appliedKeyword, {
+        page: 1,
+        pageSize,
+        sortBy,
+        sortOrder,
+        mappingStatus,
+        productClass,
+          });
     } catch (err: unknown) {
       // ── HTTP 层面 4xx/5xx 错误（Axios 抛出）────────────────────
       // 优先读后端 response body 的 message，兜底显示通用提示。
@@ -465,7 +1250,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     } finally {
       setMapSubmitting(false);
     }
-  }, [mapTarget, mapSelected, shopId, appliedKeyword, pageSize, sortBy, sortOrder, closeMapModal, fetchInventory, fetchProducts]);
+  }, [mapTarget, mapSelected, shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, closeMapModal, fetchInventory, fetchProducts]);
 
   useEffect(() => {
     fetchShops();
@@ -476,19 +1261,43 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   }, [fetchInventory]);
 
   useEffect(() => {
+    fetchClassificationSummary(shopId);
+  }, [shopId, fetchClassificationSummary]);
+
+  useEffect(() => {
+    fetchStoreOverview(shopId);
+  }, [shopId, fetchStoreOverview]);
+
+  useEffect(() => {
     setPendingUpdateCount(0);
     setPage(1);
     const kw = initialSearch?.trim();
     if (kw) {
       setSearchKeyword(kw);
       setAppliedKeyword(kw);
-      fetchProducts(shopId, kw, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
+      fetchProducts(shopId, kw, {
+        refreshSales: true,
+        page: 1,
+        pageSize,
+        sortBy,
+        sortOrder,
+        mappingStatus,
+        productClass,
+          });
     } else {
       setSearchKeyword('');
       setAppliedKeyword('');
-      fetchProducts(shopId, '', { refreshSales: true, page: 1, pageSize, sortBy, sortOrder });
+      fetchProducts(shopId, '', {
+        refreshSales: true,
+        page: 1,
+        pageSize,
+        sortBy,
+        sortOrder,
+        mappingStatus,
+        productClass,
+          });
     }
-  }, [shopId, initialSearch, fetchProducts]);
+  }, [shopId, initialSearch, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts]);
 
   // 定时轮询检测新产品，仅累加待刷新数量，不强制刷新（由用户手动触发）
   useEffect(() => {
@@ -497,6 +1306,11 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       try {
         const params: Record<string, string | number> = { shopId };
         if (appliedKeyword) params.search = appliedKeyword;
+        if (mappingStatus !== 'all') params.mappingStatus = mappingStatus;
+        if (productClass !== 'all') params.productClass = productClass;
+        if (buyBoxGroup !== 'ALL') params.buyBoxGroup = buyBoxGroup;
+        if (linkTypeFilter !== 'ALL') params.linkType = linkTypeFilter;
+        if (stockGroup !== 'ALL') params.stockGroup = stockGroup;
         const { data: res } = await request.get<{ code: number; data?: StoreProduct[] | { list?: StoreProduct[] } }>('/store-products', { params });
         if (res.code === 200) {
           const raw = res.data;
@@ -517,7 +1331,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       }
     }, 30000);
     return () => clearInterval(timer);
-  }, [shopId, appliedKeyword, loading]);
+  }, [shopId, appliedKeyword, mappingStatus, productClass, buyBoxGroup, linkTypeFilter, stockGroup, loading]);
 
   // 映射弹窗：搜索防抖
   useEffect(() => {
@@ -530,8 +1344,48 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     if (shopId == null) return;
     setPendingUpdateCount(0);
     setPage(1);
-    fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
-  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, fetchProducts]);
+    fetchProducts(shopId, appliedKeyword, {
+      page: 1,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+    });
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts]);
+
+  /** 顶部「刷新」与空态「刷新列表」共用：刷新库存字典 + 带 refreshSales 的平台产品列表 */
+  const handleRefreshList = useCallback(() => {
+    setPendingUpdateCount(0);
+    fetchInventory();
+    setPage(1);
+    fetchProducts(shopId, appliedKeyword, {
+      refreshSales: true,
+      page: 1,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+    });
+    fetchClassificationSummary(shopId);
+    fetchStoreOverview(shopId);
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts, fetchInventory, fetchClassificationSummary, fetchStoreOverview]);
+
+  const handleProductStructureCardClick = useCallback((value: ProductClass) => {
+    setProductClass(value);
+    setPage(1);
+    fetchProducts(shopId, appliedKeyword, {
+      page: 1,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass: value,
+    });
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, fetchProducts]);
+
+
 
   // ── 批量创建采购计划 ───────────────────────────────────────────
   const handleCreatePlan = useCallback(() => {
@@ -590,9 +1444,10 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         sortBy: sortByParam,
         sortOrder: sortOrderParam,
         mappingStatus,
-      });
+        productClass,
+          });
     }
-  }, [shopId, appliedKeyword, pageSize, mappingStatus, fetchProducts]);
+  }, [shopId, appliedKeyword, pageSize, mappingStatus, productClass, fetchProducts]);
 
   const columns: ColumnsType<StoreProduct> = useMemo(() => [
     {
@@ -624,6 +1479,10 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         const link = r.product_url ?? r.productUrl;
         const linkStr = link && typeof link === 'string' ? link.trim() : '';
         const titleContent = name || '-';
+        const classDisplay = getProductClassDisplay(r);
+        const reason = r.classificationReason ?? r.classification_reason ?? null;
+        const newProductStageLabel = classDisplay?.classKey === 'NEW' ? getNewProductStageLabel(r) : null;
+        const linkTypeTags = renderLinkTypeTags(r);
         return (
           <div>
             {linkStr ? (
@@ -657,70 +1516,125 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             {partNumber && (
               <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 4 }}>内部 PN：{partNumber}</div>
             )}
+            {(classDisplay || linkTypeTags) && (
+              <Space size={[4, 4]} wrap style={{ marginTop: 4 }}>
+                {classDisplay ? (
+                  <Tooltip title={reason || undefined}>
+                    <Tag color={classDisplay.color} style={{ margin: 0, fontSize: 11 }}>
+                      {classDisplay.label}
+                    </Tag>
+                  </Tooltip>
+                ) : null}
+                {newProductStageLabel ? (
+                  <Tooltip title={newProductStageLabel}>
+                    <Tag color="purple" style={{ margin: 0, fontSize: 11 }}>
+                      {newProductStageLabel}
+                    </Tag>
+                  </Tooltip>
+                ) : null}
+                {linkTypeTags}
+              </Space>
+            )}
           </div>
         );
       },
     },
     {
-      title: 'SKU',
-      dataIndex: 'sku',
-      key: 'sku',
-      width: 240,
-      align: 'center',
+      title: '编码信息',
+      key: 'codes',
+      width: 300,
+      align: 'left',
       render: (_: unknown, r: StoreProduct) => {
-        const sku = String(r.sku ?? '').trim();
+        // vendorSku：后端修正后的真实卖家 SKU，优先展示
+        const vendorSku = String(r.vendorSku ?? r.vendor_sku ?? '').trim();
+        // platformSku：eMAG 内部生成 ID，仅在 Tooltip 中展示，便于排查
+        const platformSku = String(r.sku ?? '').trim();
+        const displaySku = vendorSku || platformSku;
+        const ean = String(r.ean ?? '').trim();
+        const pnk = getPlatformProductPnk(r);
+        const hiddenCount = r.__dedupeHiddenCount ?? 0;
+        const hiddenPnks = r.__dedupeHiddenPnks ?? [];
+
         // 仅以后端明确返回的关联字段为准，去掉本地字典兜底，
         // 避免 SKU 名称相同但未实际绑定的行误亮"已关联"标签。
         const isMapped = !!(r.mapped_inventory_sku || r.inventorySku || r.inventory_sku);
-        const isLinked = isMapped;
-        const pnk = String(r.pnk ?? r.part_number_key ?? r.partNumber ?? '').trim();
-        const codeStyle = { fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', fontSize: 14, fontWeight: 400 };
+        const codeStyle: React.CSSProperties = {
+          fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+          fontSize: 13,
+          fontWeight: 400,
+          wordBreak: 'break-all',
+        };
+        const labelStyle: React.CSSProperties = {
+          color: '#94a3b8',
+          fontSize: 12,
+          flexShrink: 0,
+        };
+        const rowStyle: React.CSSProperties = {
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          flexWrap: 'wrap',
+          lineHeight: 1.45,
+        };
+
         return (
-          <Space size={4} align="center" wrap style={{ justifyContent: 'center' }}>
-            <Text copyable={sku ? { text: sku } : undefined} style={codeStyle}>{sku || '-'}</Text>
-            {isLinked && (
-              <Tag color="success" style={{ margin: 0, fontSize: 11 }}>已关联</Tag>
-            )}
-            {pnk && (
-              <Tooltip title="手动绑定库存 SKU">
-                <Button
-                  type="link"
-                  size="small"
-                  icon={<LinkOutlined style={{ color: '#2563eb', fontSize: 14 }} />}
-                  onClick={() => openMapModal(r)}
-                  style={{ padding: '0 4px', minWidth: 24, height: 24 }}
-                />
+          <Space direction="vertical" size={3} style={{ width: '100%' }}>
+            <div style={rowStyle}>
+              <span style={labelStyle}>SKU：</span>
+              <Tooltip
+                title={vendorSku && platformSku && vendorSku !== platformSku
+                  ? `平台内部 SKU：${platformSku}`
+                  : undefined}
+                placement="top"
+              >
+                <Text copyable={displaySku ? { text: displaySku } : undefined} style={codeStyle}>
+                  {displaySku || '-'}
+                </Text>
               </Tooltip>
+              {isMapped && (
+                <Tag color="success" style={{ margin: 0, fontSize: 11 }}>已关联</Tag>
+              )}
+              {pnk && (
+                <Tooltip title="手动绑定库存 SKU">
+                  <Button
+                    type="link"
+                    size="small"
+                    icon={<LinkOutlined style={{ color: '#2563eb', fontSize: 14 }} />}
+                    onClick={() => openMapModal(r)}
+                    style={{ padding: '0 4px', minWidth: 24, height: 24 }}
+                  />
+                </Tooltip>
+              )}
+            </div>
+            {vendorSku && platformSku && vendorSku !== platformSku && (
+              <div style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'monospace', lineHeight: 1.3 }}>
+                平台SKU：{platformSku}
+              </div>
             )}
+            <div style={rowStyle}>
+              <span style={labelStyle}>EAN：</span>
+              <Text copyable={ean ? { text: ean } : undefined} style={codeStyle}>
+                {ean || '-'}
+              </Text>
+              {hiddenCount > 0 && (
+                <Tooltip
+                  title={hiddenPnks.length > 0
+                    ? `该 EAN 包含多个历史 PNK：${hiddenPnks.join('、')}`
+                    : `该 EAN 已自动隐藏 ${hiddenCount} 条冗余历史记录`}
+                >
+                  <Tag color="default" style={{ margin: 0, fontSize: 11 }}>
+                    历史 PNK ×{hiddenCount}
+                  </Tag>
+                </Tooltip>
+              )}
+            </div>
+            <div style={rowStyle}>
+              <span style={labelStyle}>PNK：</span>
+              <Text copyable={pnk ? { text: pnk } : undefined} style={codeStyle}>
+                {pnk || '-'}
+              </Text>
+            </div>
           </Space>
-        );
-      },
-    },
-    {
-      title: 'EAN',
-      dataIndex: 'ean',
-      key: 'ean',
-      width: 160,
-      align: 'center',
-      render: (_: unknown, r: StoreProduct) => {
-        const ean = String(r.ean ?? '').trim();
-        const codeStyle = { fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', fontSize: 14, fontWeight: 400 };
-        return (
-          <Text copyable={ean ? { text: ean } : undefined} style={codeStyle}>{ean || '-'}</Text>
-        );
-      },
-    },
-    {
-      title: 'PNK 码',
-      dataIndex: 'pnk',
-      key: 'pnk',
-      width: 160,
-      align: 'center',
-      render: (_: unknown, r: StoreProduct) => {
-        const pnk = String(r.pnk ?? '').trim();
-        const codeStyle = { fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace', fontSize: 14, fontWeight: 400 };
-        return (
-          <Text copyable={pnk ? { text: pnk } : undefined} style={codeStyle}>{pnk || '-'}</Text>
         );
       },
     },
@@ -822,7 +1736,32 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       sortOrder: sortBy === 'stock' ? sortOrder : undefined,
       render: (_: unknown, r: StoreProduct) => {
         const v = r.platformStock ?? r.platform_stock ?? r.stock;
-        return <span>{v != null ? v : '-'}</span>;
+        const rawStockStatus = r.stockStatus ?? r.stock_status ?? null;
+        const stockStatusKey = typeof rawStockStatus === 'string' ? rawStockStatus.trim().toUpperCase() : '';
+        const stockStatusConfig = STOCK_STATUS_TAG_MAP[stockStatusKey as StockStatusValue];
+        const stockDaysRaw = r.stockDays ?? r.stock_days ?? null;
+        const stockDays = stockDaysRaw != null && !Number.isNaN(Number(stockDaysRaw)) ? Number(stockDaysRaw) : null;
+        const dailySalesRaw = r.stockDailySales ?? r.stock_daily_sales ?? r.comprehensive_sales ?? r.purchaseSuggestion?.dailySales ?? null;
+        const dailySales = dailySalesRaw != null && !Number.isNaN(Number(dailySalesRaw)) ? Number(dailySalesRaw) : null;
+        const stockStatusTag = stockStatusConfig ? (
+          <Tag color={stockStatusConfig.color} style={{ margin: 0, fontSize: 11 }}>
+            {stockStatusConfig.label}
+          </Tag>
+        ) : null;
+        const tooltip = stockDays != null ? (
+          <div>
+            <div>预计可售天数：{stockDays.toFixed(1)} 天</div>
+            <div>参考日销：{dailySales != null ? dailySales.toFixed(2) : '-'} 单/天</div>
+          </div>
+        ) : null;
+        return (
+          <Space direction="vertical" size={2} align="center">
+            <span>{v != null ? v : '-'}</span>
+            {tooltip && stockStatusTag ? (
+              <Tooltip title={tooltip}>{stockStatusTag}</Tooltip>
+            ) : stockStatusTag}
+          </Space>
+        );
       },
     },
     {
@@ -838,7 +1777,6 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       key: 'inTransitQuantity',
       width: 130,
       align: 'center',
-      fixed: 'right' as const,
       render: (_: unknown, r: StoreProduct) => {
         const erp      = r.inTransitQuantity ?? r.in_transit_quantity ?? 0;
         const platform = r.stockInTransit    ?? r.stock_in_transit    ?? null;
@@ -882,7 +1820,242 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         );
       },
     },
+    {
+      title: '建议采购量',
+      key: 'purchaseSuggestion',
+      width: 120,
+      align: 'center',
+      fixed: 'right' as const,
+      render: (_: unknown, r: StoreProduct) => {
+        const suggestion = getPurchaseSuggestion(r);
+        const rawSuggestAmount = suggestion?.suggestAmount;
+        const suggestAmount = rawSuggestAmount != null && !Number.isNaN(Number(rawSuggestAmount))
+          ? Number(rawSuggestAmount)
+          : null;
+        const displayAmount = suggestAmount != null && suggestAmount > 0 ? suggestAmount : null;
+        if (!suggestion) return <span style={{ color: '#94a3b8' }}>-</span>;
+
+        const suggestionText = (suggestion.text ?? suggestion.label ?? '').trim();
+        const suggestionReason = (suggestion.reason ?? '').trim();
+        const formatValue = (value: number | null | undefined) => (
+          value != null && !Number.isNaN(Number(value)) ? Number(value) : null
+        );
+        const stockDetailRows = [
+          { label: '目标库存', value: formatValue(suggestion.targetStock) },
+          { label: '平台库存', value: formatValue(suggestion.platformStock) },
+          { label: '平台在途', value: formatValue(suggestion.platformInTransit ?? r.in_transit_quantity ?? null) },
+          { label: '本地库存', value: formatValue(suggestion.localStock) },
+          { label: '采购在途', value: formatValue(suggestion.purchasingInTransit ?? suggestion.purchasingStock) },
+          { label: '计划中', value: formatValue(suggestion.planningStock) },
+        ].filter((row) => row.value != null);
+        const coverageDetailRows = [
+          { label: '目标库存天数', value: formatTargetStockDays(suggestion.targetStockDays ?? suggestion.target_stock_days) },
+          { label: '平台可售天数', value: formatDecimalDays(suggestion.platformStockDays ?? suggestion.platform_stock_days) },
+          { label: '总覆盖天数', value: formatDecimalDays(suggestion.totalCoverageDays ?? suggestion.total_coverage_days) },
+          { label: '新品阶段', value: getExplicitLabel(suggestion.newProductStageLabel ?? suggestion.new_product_stage_label) ?? '-' },
+          { label: '首次可售时间', value: formatFirstAvailableAt(suggestion.firstAvailableAt ?? suggestion.first_available_at) },
+        ];
+        const detailRows = [
+          ...stockDetailRows,
+          ...coverageDetailRows,
+          { label: '建议采购', value: displayAmount ?? 0, strong: true },
+        ];
+
+        const content = (
+          <div style={{ minWidth: 260, fontSize: 13 }}>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ color: '#64748b' }}>采购建议</div>
+              <div style={{ color: '#1e293b', fontWeight: 600 }}>
+                {suggestionText || (displayAmount ? `建议采购 ${displayAmount}` : '暂无采购建议')}
+              </div>
+            </div>
+            {suggestionReason && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ color: '#64748b' }}>原因</div>
+                <div style={{ color: '#1e293b', lineHeight: 1.5 }}>{suggestionReason}</div>
+              </div>
+            )}
+            <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
+              {detailRows.map((row) => (
+                <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, lineHeight: 1.8 }}>
+                  <span style={{ color: row.strong ? '#1e293b' : '#64748b', fontWeight: row.strong ? 700 : 400 }}>
+                    {row.label}
+                  </span>
+                  <span style={{ color: row.strong ? '#2563eb' : '#1e293b', fontWeight: row.strong ? 700 : 500, fontFeatureSettings: '"tnum"' }}>
+                    {row.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+
+        return (
+          <Popover title="采购建议详情" content={content} placement="top">
+            {displayAmount != null ? (
+              <span style={{ color: '#2563eb', cursor: 'pointer', fontWeight: 700, fontFeatureSettings: '"tnum"' }}>
+                {displayAmount}
+              </span>
+            ) : (
+              <span style={{ color: '#94a3b8', cursor: 'pointer' }}>-</span>
+            )}
+          </Popover>
+        );
+      },
+    },
+    {
+      title: '运营建议',
+      key: 'operationAdvice',
+      width: 150,
+      align: 'center',
+      fixed: 'right' as const,
+      render: (_: unknown, r: StoreProduct) => {
+        const operationAdvice = r.operationAdvice ?? r.operation_advice ?? null;
+        if (!operationAdvice) return <span style={{ color: '#94a3b8' }}>-</span>;
+
+        const rawPriority = operationAdvice.priority;
+        const priorityConfig = rawPriority ? OPERATION_PRIORITY_MAP[rawPriority] : null;
+        const rawAction = operationAdvice.action;
+        const { fullLabel, shortLabel } = getOperationAdviceLabels(operationAdvice);
+        const reason = operationAdvice.reason?.trim();
+        const tags = Array.isArray(operationAdvice.tags)
+          ? operationAdvice.tags.filter((tag) => typeof tag === 'string' && tag.trim()).map((tag) => tag.trim())
+          : [];
+        const metrics = operationAdvice.metrics && typeof operationAdvice.metrics === 'object'
+          ? operationAdvice.metrics
+          : null;
+        const metricRows = metrics ? [
+          { label: '产品分类', value: metrics.productClass ?? metrics.product_class },
+          { label: '库存状态', value: metrics.stockStatus ?? metrics.stock_status },
+          { label: '平台库存', value: metrics.platformStock ?? metrics.platform_stock },
+          { label: '可售天数', value: metrics.stockDays ?? metrics.stock_days },
+          { label: '近30天销量', value: metrics.sales30d ?? metrics.sales_30d },
+          { label: '综合日销', value: metrics.comprehensiveSales ?? metrics.comprehensive_sales },
+          { label: '建议采购量', value: metrics.suggestAmount ?? metrics.suggest_amount ?? r.purchaseSuggestion?.suggestAmount },
+          { label: '预估毛利', value: metrics.estimatedProfit ?? metrics.estimated_profit },
+          { label: '毛利率', value: metrics.profitMarginPct ?? metrics.profit_margin_pct },
+          { label: '规则版本', value: metrics.ruleVersion ?? metrics.rule_version },
+        ]
+          .map((row) => ({ ...row, value: formatMetricValue(row.value) }))
+          .filter((row) => row.value != null) : [];
+        const weak = rawAction === 'OBSERVE' || rawPriority === 'P3';
+
+        const content = (
+          <div style={{ minWidth: 260, maxWidth: 360, fontSize: 13 }}>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ color: '#64748b' }}>运营建议</div>
+              <div style={{ color: '#1e293b', fontWeight: 700 }}>{fullLabel}</div>
+            </div>
+            {priorityConfig && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span style={{ color: '#64748b' }}>优先级</span>
+                <Tag color={priorityConfig.color} style={{ margin: 0 }}>{priorityConfig.label}</Tag>
+              </div>
+            )}
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ color: '#64748b' }}>原因</div>
+              <div style={{ color: '#1e293b', lineHeight: 1.5 }}>{reason || '暂无详细原因'}</div>
+            </div>
+            {tags.length > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ color: '#64748b', marginBottom: 4 }}>标签</div>
+                <Space size={[4, 4]} wrap>
+                  {tags.map((tag) => (
+                    <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
+                  ))}
+                </Space>
+              </div>
+            )}
+            {metricRows.length > 0 && (
+              <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
+                <div style={{ color: '#64748b', marginBottom: 4 }}>关键指标</div>
+                {metricRows.map((row) => (
+                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, lineHeight: 1.8 }}>
+                    <span style={{ color: '#64748b' }}>{row.label}</span>
+                    <span style={{ color: '#1e293b', fontWeight: 500, textAlign: 'right' }}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+
+        return (
+          <Popover title="运营建议详情" content={content} placement="top">
+            <div style={{ cursor: 'pointer', maxWidth: 140, margin: '0 auto' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: reason ? 2 : 0 }}>
+                {priorityConfig && <Tag color={priorityConfig.color} style={{ margin: 0 }}>{priorityConfig.label}</Tag>}
+                <span style={{
+                  color: weak ? '#64748b' : '#1e293b',
+                  fontWeight: rawPriority === 'P0' || rawPriority === 'P1' ? 700 : 600,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>
+                  {shortLabel}
+                </span>
+              </div>
+              {reason && (
+                <div style={{ color: '#64748b', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {reason}
+                </div>
+              )}
+            </div>
+          </Popover>
+        );
+      },
+    },
   ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected]);
+
+  /** 纯数字且不足 13 位时提示（EAN 通常为 13 位，含前导零场景由后端统一） */
+  const searchEanHint = useMemo(() => {
+    const t = searchKeyword.trim();
+    if (!t || !/^\d+$/.test(t)) return null;
+    if (t.length >= 13) return null;
+    return '正在尝试匹配相似编码';
+  }, [searchKeyword]);
+
+  /** 有搜索词且无数据时：引导刷新列表 / 拉取平台产品 */
+  const tableEmptyText = useMemo(() => {
+    if (!shopId) {
+      return <Empty description="请先选择店铺" style={{ padding: 48 }} />;
+    }
+    const kw = appliedKeyword.trim();
+    if (kw) {
+      return (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            <div style={{ maxWidth: 400, margin: '0 auto' }}>
+              <div style={{ marginBottom: 8 }}>未找到与「{kw}」相关的产品</div>
+              <div style={{ color: '#94a3b8', fontSize: 13 }}>
+                若数据尚未同步，可先刷新列表或拉取平台产品，更新当前店铺数据。
+              </div>
+            </div>
+          }
+          extra={
+            <Space wrap>
+              <Button type="primary" icon={<ReloadOutlined />} onClick={handleRefreshList} loading={loading}>
+                刷新列表
+              </Button>
+              <Button
+                icon={<DownloadOutlined />}
+                onClick={handleSyncProducts}
+                loading={syncProductsLoading}
+                disabled={!shopId}
+              >
+                拉取平台产品
+              </Button>
+            </Space>
+          }
+          style={{ padding: 48 }}
+        />
+      );
+    }
+    return <Empty description="暂无平台产品" style={{ padding: 48 }} />;
+  }, [shopId, appliedKeyword, handleRefreshList, handleSyncProducts, loading, syncProductsLoading]);
+
+  const productStructureSummary = storeOverview?.productStructure ?? classificationSummary;
 
   return (
     <div>
@@ -891,9 +2064,6 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
           <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#1e293b', display: 'flex', alignItems: 'center', gap: 10 }}>
             <AppstoreOutlined style={{ color: '#2563eb' }} /> 平台产品
           </h2>
-          <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 13 }}>
-            已上架至授权店铺的产品，与库存 SKU、公海产品完全隔离
-          </p>
         </div>
         <Space>
           <Space size="small">
@@ -912,13 +2082,13 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
               style={{ minWidth: 200 }}
             />
           </Space>
-            <Button icon={<ReloadOutlined />} onClick={() => { setPendingUpdateCount(0); fetchInventory(); setPage(1); fetchProducts(shopId, appliedKeyword, { refreshSales: true, page: 1, pageSize, sortBy, sortOrder, mappingStatus }); }} loading={loading}>
+            <Button icon={<ReloadOutlined />} onClick={handleRefreshList} loading={loading}>
             刷新
           </Button>
         </Space>
       </div>
 
-      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         {/* 批量处理 Dropdown */}
         <Dropdown
           trigger={['click']}
@@ -972,19 +2142,89 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             ⚙️ 店铺操作 <DownOutlined />
           </Button>
         </Dropdown>
-      </div>
-
-      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <Select<BuyBoxGroupFilter>
+          value={buyBoxGroup}
+          onChange={(val) => {
+            setBuyBoxGroup(val);
+            setPage(1);
+            fetchProducts(shopId, appliedKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus,
+              productClass,
+              buyBoxGroup: val,
+              linkType: linkTypeFilter,
+              stockGroup,
+            });
+          }}
+          style={{ width: 120 }}
+          labelRender={renderFilterEntryLabel('购物车状态')}
+          options={BUY_BOX_FILTER_OPTIONS}
+        />
+        <Select<LinkTypeFilter>
+          value={linkTypeFilter}
+          onChange={(val) => {
+            setLinkTypeFilter(val);
+            setPage(1);
+            fetchProducts(shopId, appliedKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus,
+              productClass,
+              buyBoxGroup,
+              linkType: val,
+              stockGroup,
+            });
+          }}
+          style={{ width: 110 }}
+          labelRender={renderFilterEntryLabel('链接属性')}
+          options={LINK_TYPE_FILTER_OPTIONS}
+        />
+        <Select<StockGroupFilter>
+          value={stockGroup}
+          onChange={(val) => {
+            setStockGroup(val);
+            setPage(1);
+            fetchProducts(shopId, appliedKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus,
+              productClass,
+              buyBoxGroup,
+              linkType: linkTypeFilter,
+              stockGroup: val,
+            });
+          }}
+          style={{ width: 120 }}
+          labelRender={renderFilterEntryLabel('库存状态')}
+          options={STOCK_GROUP_FILTER_OPTIONS}
+        />
         <Select
           value={mappingStatus}
           onChange={(val: 'all' | 'mapped' | 'unmapped') => {
             setMappingStatus(val);
             setPage(1);
-            fetchProducts(shopId, appliedKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus: val });
+            fetchProducts(shopId, appliedKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus: val,
+              productClass,
+              buyBoxGroup,
+              linkType: linkTypeFilter,
+              stockGroup,
+            });
           }}
-          style={{ width: 130 }}
+          style={{ width: 120 }}
           options={[
-            { value: 'all',      label: '全部状态' },
+            { value: 'all',      label: '关联状态' },
             { value: 'mapped',   label: '✅ 已关联' },
             { value: 'unmapped', label: '⭕ 未关联' },
           ]}
@@ -993,7 +2233,24 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
           placeholder="输入 SKU / EAN / PNK 码搜索..."
           prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
           value={searchKeyword}
-          onChange={(e) => setSearchKeyword(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value;
+            setSearchKeyword(next);
+            // 点击清空（X）或手动删光：同步清空已应用关键词并拉全量列表，避免列表仍停留在上次搜索结果
+            if (next !== '') return;
+            setAppliedKeyword('');
+            setPage(1);
+            if (shopId != null) {
+              fetchProducts(shopId, '', {
+                page: 1,
+                pageSize,
+                sortBy,
+                sortOrder,
+                mappingStatus,
+                productClass,
+                                  });
+            }
+          }}
           onPressEnter={() => {
             if (shopId == null) {
               message.warning('请先选择店铺');
@@ -1001,10 +2258,17 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             }
             setAppliedKeyword(searchKeyword);
             setPage(1);
-            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+            fetchProducts(shopId, searchKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus,
+              productClass,
+                            });
           }}
           allowClear
-          style={{ width: 280 }}
+          style={{ width: 260 }}
         />
         <Button
           type="primary"
@@ -1016,7 +2280,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             }
             setAppliedKeyword(searchKeyword);
             setPage(1);
-            fetchProducts(shopId, searchKeyword, { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+            fetchProducts(shopId, searchKeyword, {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus,
+              productClass,
+                            });
           }}
           loading={loading}
         >
@@ -1024,15 +2295,59 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         </Button>
         <Button
           onClick={() => {
+            setProductClass('all');
+            setBuyBoxGroup('ALL');
+            setLinkTypeFilter('ALL');
+            setStockGroup('ALL');
+            setMappingStatus('all');
             setSearchKeyword('');
             setAppliedKeyword('');
             setPage(1);
-            fetchProducts(shopId, '', { page: 1, pageSize, sortBy, sortOrder, mappingStatus });
+            fetchProducts(shopId, '', {
+              page: 1,
+              pageSize,
+              sortBy,
+              sortOrder,
+              mappingStatus: 'all',
+              productClass: 'all',
+              buyBoxGroup: 'ALL',
+              linkType: 'ALL',
+              stockGroup: 'ALL',
+            });
+            fetchClassificationSummary(shopId);
+            fetchStoreOverview(shopId);
           }}
           loading={loading}
         >
           重置
         </Button>
+      </div>
+      {searchEanHint && (
+        <div style={{ marginBottom: 16 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            <InfoCircleOutlined style={{ marginRight: 6, color: '#94a3b8' }} />
+            {searchEanHint}
+          </Text>
+        </div>
+      )}
+
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          <span style={{ fontWeight: 600, color: '#1e293b' }}>店铺结构概览</span>
+          <span style={{ color: '#cbd5e1', fontSize: 12 }}>｜</span>
+          <span style={{ color: '#94a3b8', fontSize: 12 }}>点击产品结构卡片可快速筛选对应产品</span>
+        </div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
+          <div style={{ flex: '1 1 620px', minWidth: 0, maxWidth: '100%' }}>
+            {renderOverviewCards<ProductClass>({
+              cards: PRODUCT_STRUCTURE_CARDS,
+              getCount: (value) => getProductClassCount(productStructureSummary, value),
+              activeValue: productClass,
+              onCardClick: handleProductStructureCardClick,
+            })}
+          </div>
+          {renderProductClassActionTips(productClass)}
+        </div>
       </div>
 
       {pendingUpdateCount > 0 && (
@@ -1055,7 +2370,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
           rowKey="id"
           loading={loading}
           onChange={handleTableChange}
-          scroll={{ x: 'max-content', y: 'calc(100vh - 320px)' }}
+          scroll={{ x: 'max-content', y: 'calc(100vh - 340px)' }}
           rowSelection={{
             selectedRowKeys,
             onChange: (keys, rows) => { setSelectedRowKeys(keys); setSelectedRows(rows); },
@@ -1066,9 +2381,11 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             pageSize,
             total: totalCount,
             showSizeChanger: true,
-            showTotal: (total) => `共 ${total} 条`,
+            showTotal: (total) => dedupeFilteredCount > 0
+              ? `共 ${total} 条（本页已自动过滤 ${dedupeFilteredCount} 条冗余历史记录）`
+              : `共 ${total} 条`,
           }}
-          locale={{ emptyText: <Empty description={shopId ? '暂无平台产品' : '请先选择店铺'} style={{ padding: 48 }} /> }}
+          locale={{ emptyText: tableEmptyText }}
         />
       </div>
 
@@ -1076,6 +2393,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       <RepeatPurchaseModal
         open={planModalOpen}
         rows={planRows}
+        shopId={shopId}
         onCancel={() => setPlanModalOpen(false)}
         onSuccess={() => { setPlanModalOpen(false); setSelectedRowKeys([]); setSelectedRows([]); }}
       />
