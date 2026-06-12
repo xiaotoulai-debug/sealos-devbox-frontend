@@ -3,6 +3,8 @@ node_modules/
 dist/
 dist-ssr/
 build/
+.vite-cache/
+.vite/
 
 # ===== 环境变量与密钥（最高优先级保护）=====
 .env
