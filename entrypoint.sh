@@ -6,8 +6,8 @@ set -e
 MODE="${1:-devbox}"
 
 if [ "$MODE" = "production" ]; then
-  echo "[entrypoint] 生产模式：npm run build（.env.production）"
-  npm run build
+  echo "[entrypoint] 生产模式：npm run build:production（.env.production）"
+  npm run build:production
 else
   echo "[entrypoint] DEVBOX 测试模式：npm run build:devbox（.env.development）"
   npm run build:devbox
