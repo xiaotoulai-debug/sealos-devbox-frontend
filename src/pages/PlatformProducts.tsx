@@ -37,17 +37,27 @@ type StockStatusValue =
   | 'SAFE'
   | 'OVERSTOCK';
 
-type OperationPriority = 'P0' | 'P1' | 'P2' | 'P3';
+type OperationPriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5';
 
 type OperationAction =
-  | 'RAISE_PRICE'
-  | 'LOWER_PRICE'
+  | 'URGENT_REPLENISH'
+  | 'RAISE_PROFIT'
+  | 'RAISE_PRICE_MODERATELY'
   | 'JOIN_CAMPAIGN'
-  | 'ADVERTISE'
-  | 'CLEARANCE'
-  | 'PAUSE_PURCHASE'
+  | 'COMPLAIN_HIJACKER'
+  | 'WIN_BUY_BOX'
+  | 'ADJUST_ADS'
+  | 'CREATE_AD'
+  | 'INCREASE_CPC'
+  | 'LOWER_PRICE'
   | 'WAIT_FOR_ARRIVAL'
-  | 'OBSERVE';
+  | 'PAUSE_PURCHASE'
+  | 'OBSERVE'
+  | 'RAISE_PRICE'
+  | 'ADVERTISE'
+  | 'CLEARANCE';
+
+type KnownOperationAction = OperationAction;
 
 type BuyBoxGroupFilter = 'ALL' | 'WON' | 'NOT_WON' | 'UNKNOWN';
 type LinkTypeFilter = 'ALL' | 'SELF_BUILT' | 'RESELL' | 'OWN_BRAND_RESELL' | 'UNKNOWN';
@@ -64,6 +74,7 @@ interface FetchProductsOptions {
   buyBoxGroup?: BuyBoxGroupFilter;
   linkType?: LinkTypeFilter;
   stockGroup?: StockGroupFilter;
+  operationAction?: string;
 }
 
 type ClassificationSummary = Partial<Record<ProductClassValue | LegacyProductClassValue | 'total', number>>;
@@ -83,19 +94,37 @@ type OverviewCard<T extends string> = {
 
 type ActionTipLevel = 'danger' | 'warning' | 'primary' | 'default';
 
-interface ProductClassActionTip {
-  text: string;
-  level: ActionTipLevel;
+type ClassificationSuggestionAction = {
+  label: string;
+  action?: OperationAction;
+  tone: ActionTipLevel;
+};
+
+interface OperationActionStat {
+  action: string;
+  label?: string | null;
+  count: number;
+}
+
+interface ProductClassActionTipsProps {
+  productClass: ProductClass;
+  actionStats: OperationActionStat[];
+  hasOperationActionStatsField: boolean;
+  selectedAction?: string;
+  onActionClick: (action: string) => void;
+  onClearActionFilter: () => void;
 }
 
 interface OperationAdvice {
-  priority?: OperationPriority;
-  action?: OperationAction;
-  title?: string;
-  reason?: string;
-  tags?: string[];
-  metrics?: Record<string, unknown>;
+  priority?: OperationPriority | string | null;
+  action?: OperationAction | string | null;
+  title?: string | null;
+  reason?: string | null;
+  tags?: string[] | null;
+  metrics?: Record<string, unknown> | null;
 }
+
+const OPERATION_ADVICE_DISPLAY_LIMIT = 3;
 
 const BUY_BOX_FILTER_OPTIONS = [
   { value: 'ALL', label: '全部' },
@@ -158,50 +187,50 @@ const PRODUCT_STRUCTURE_CARDS = [
   },
 ] satisfies { value: ProductClass; title: string; description: string }[];
 
-const PRODUCT_CLASS_ACTION_TIPS = {
+const PRODUCT_CLASS_SUGGESTION_ACTIONS = {
   all: [
-    { text: '优先查看低库存', level: 'warning' },
-    { text: '检查未关联SKU', level: 'primary' },
-    { text: '处理负毛利产品', level: 'danger' },
-    { text: '补充缺失图片', level: 'default' },
-    { text: '关注无销量库存', level: 'warning' },
+    { label: '优先查看低库存', tone: 'warning' },
+    { label: '检查未关联SKU', tone: 'primary' },
+    { label: '处理负毛利产品', action: 'RAISE_PROFIT', tone: 'danger' },
+    { label: '补充缺失图片', tone: 'default' },
+    { label: '关注无销量库存', tone: 'warning' },
   ],
   HOT: [
-    { text: '库存较低', level: 'warning' },
-    { text: '紧急补货', level: 'danger' },
-    { text: '适度提价', level: 'warning' },
-    { text: '加大广告', level: 'primary' },
-    { text: '保持排名', level: 'default' },
+    { label: '库存较低', tone: 'warning' },
+    { label: '紧急补货', action: 'URGENT_REPLENISH', tone: 'danger' },
+    { label: '适度提价', action: 'RAISE_PRICE_MODERATELY', tone: 'warning' },
+    { label: '加大广告', action: 'ADJUST_ADS', tone: 'primary' },
+    { label: '保持排名', tone: 'default' },
   ],
   NEW: [
-    { text: '优先补货入仓', level: 'primary' },
-    { text: '观察首周动销', level: 'warning' },
-    { text: '完善listing资料', level: 'default' },
-    { text: '控制首批备货', level: 'warning' },
-    { text: '跟踪可售时间', level: 'primary' },
+    { label: '优先补货入仓', action: 'WAIT_FOR_ARRIVAL', tone: 'primary' },
+    { label: '观察首周动销', action: 'OBSERVE', tone: 'warning' },
+    { label: '完善listing资料', tone: 'default' },
+    { label: '控制首批备货', tone: 'warning' },
+    { label: '跟踪可售时间', tone: 'primary' },
   ],
   POTENTIAL: [
-    { text: '加广告测试', level: 'primary' },
-    { text: '小批量补货', level: 'warning' },
-    { text: '观察转化率', level: 'default' },
-    { text: '优化主图文案', level: 'primary' },
-    { text: '提高曝光', level: 'warning' },
+    { label: '加广告测试', action: 'ADJUST_ADS', tone: 'primary' },
+    { label: '小批量补货', action: 'URGENT_REPLENISH', tone: 'warning' },
+    { label: '观察转化率', action: 'OBSERVE', tone: 'default' },
+    { label: '优化主图文案', tone: 'primary' },
+    { label: '提高曝光', action: 'ADJUST_ADS', tone: 'warning' },
   ],
   NORMAL: [
-    { text: '保持价格', level: 'default' },
-    { text: '正常维护', level: 'primary' },
-    { text: '检查库存', level: 'warning' },
-    { text: '补齐资料', level: 'default' },
-    { text: '观察波动', level: 'default' },
+    { label: '保持价格', tone: 'default' },
+    { label: '正常维护', tone: 'primary' },
+    { label: '检查库存', tone: 'warning' },
+    { label: '补齐资料', tone: 'default' },
+    { label: '观察波动', action: 'OBSERVE', tone: 'default' },
   ],
   CLEARANCE: [
-    { text: '降价清仓', level: 'danger' },
-    { text: '停止采购', level: 'danger' },
-    { text: '组合促销', level: 'warning' },
-    { text: '检查滞销原因', level: 'primary' },
-    { text: '减少库存占用', level: 'warning' },
+    { label: '降低价格', action: 'LOWER_PRICE', tone: 'danger' },
+    { label: '参与活动', action: 'JOIN_CAMPAIGN', tone: 'warning' },
+    { label: '调整广告', action: 'ADJUST_ADS', tone: 'warning' },
+    { label: '暂停采购', action: 'PAUSE_PURCHASE', tone: 'danger' },
+    { label: '减少库存占用', tone: 'warning' },
   ],
-} as const satisfies Record<ProductClass, readonly ProductClassActionTip[]>;
+} as const satisfies Record<ProductClass, readonly ClassificationSuggestionAction[]>;
 
 const ACTION_TIP_LEVEL_STYLE = {
   danger: { color: '#dc2626', background: '#fef2f2', borderColor: '#fecaca' },
@@ -246,34 +275,123 @@ const STOCK_STATUS_TAG_MAP = {
   OVERSTOCK: { color: 'blue', label: '库存偏多' },
 } as const satisfies Record<StockStatusValue, { color: string; label: string }>;
 
-const OPERATION_PRIORITY_MAP = {
-  P0: { color: 'red', label: 'P0' },
-  P1: { color: 'orange', label: 'P1' },
-  P2: { color: 'blue', label: 'P2' },
-  P3: { color: 'default', label: 'P3' },
-} as const satisfies Record<OperationPriority, { color: string; label: string }>;
+const OPERATION_PRIORITY_STYLE_MAP = {
+  P0: { color: '#dc2626', background: '#fef2f2', borderColor: '#fecaca', label: 'P0' },
+  P1: { color: '#dc2626', background: '#fef2f2', borderColor: '#fecaca', label: 'P1' },
+  P2: { color: '#ea580c', background: '#fff7ed', borderColor: '#fed7aa', label: 'P2' },
+  P3: { color: '#ca8a04', background: '#fefce8', borderColor: '#fde047', label: 'P3' },
+  P4: { color: '#2563eb', background: '#eff6ff', borderColor: '#bfdbfe', label: 'P4' },
+  P5: { color: '#334155', background: '#f1f5f9', borderColor: '#cbd5e1', label: 'P5' },
+} as const satisfies Record<OperationPriority, { color: string; background: string; borderColor: string; label: string }>;
 
-const OPERATION_ACTION_LABEL_MAP = {
-  RAISE_PRICE: '建议涨价',
-  LOWER_PRICE: '建议降价',
-  JOIN_CAMPAIGN: '参加活动',
-  ADVERTISE: '加广告',
-  CLEARANCE: '清仓处理',
-  PAUSE_PURCHASE: '暂停采购',
-  WAIT_FOR_ARRIVAL: '等待到货',
-  OBSERVE: '观察即可',
-} as const satisfies Record<OperationAction, string>;
+const OPERATION_PRIORITY_UNKNOWN_STYLE = {
+  color: '#64748b',
+  background: '#f8fafc',
+  borderColor: '#e2e8f0',
+  label: '-',
+} as const;
 
-const OPERATION_ACTION_SHORT_LABEL_MAP = {
-  RAISE_PRICE: '建议涨价',
-  LOWER_PRICE: '建议降价',
-  JOIN_CAMPAIGN: '参加活动',
-  ADVERTISE: '加广告',
-  CLEARANCE: '清仓处理',
+const OPERATION_ACTION_LABEL_MAP: Record<KnownOperationAction, string> = {
+  URGENT_REPLENISH: '紧急补货',
+  RAISE_PROFIT: '提高毛利',
+  RAISE_PRICE_MODERATELY: '适度提价',
+  JOIN_CAMPAIGN: '参与活动',
+  COMPLAIN_HIJACKER: '投诉跟卖',
+  WIN_BUY_BOX: '抢购物车',
+  ADJUST_ADS: '调整广告',
+  CREATE_AD: '调整广告',
+  INCREASE_CPC: '调整广告',
+  LOWER_PRICE: '降低价格',
+  WAIT_FOR_ARRIVAL: '新品待入仓',
   PAUSE_PURCHASE: '暂停采购',
-  WAIT_FOR_ARRIVAL: '等待到货',
-  OBSERVE: '观察即可',
-} as const satisfies Record<OperationAction, string>;
+  OBSERVE: '继续观察',
+  RAISE_PRICE: '建议涨价',
+  ADVERTISE: '调整广告',
+  CLEARANCE: '清仓处理',
+};
+
+const OPERATION_ACTION_SHORT_LABEL_MAP: Record<KnownOperationAction, string> = {
+  URGENT_REPLENISH: '紧急补货',
+  RAISE_PROFIT: '提高毛利',
+  RAISE_PRICE_MODERATELY: '适度提价',
+  JOIN_CAMPAIGN: '参与活动',
+  COMPLAIN_HIJACKER: '投诉跟卖',
+  WIN_BUY_BOX: '抢购物车',
+  ADJUST_ADS: '调整广告',
+  CREATE_AD: '调整广告',
+  INCREASE_CPC: '调整广告',
+  LOWER_PRICE: '降价',
+  WAIT_FOR_ARRIVAL: '待入仓',
+  PAUSE_PURCHASE: '暂停采购',
+  OBSERVE: '观察',
+  RAISE_PRICE: '建议涨价',
+  ADVERTISE: '调整广告',
+  CLEARANCE: '清仓',
+};
+
+const AD_OPERATION_ACTIONS = new Set([
+  'ADJUST_ADS',
+  'CREATE_AD',
+  'INCREASE_CPC',
+  'ADVERTISE',
+]);
+
+function isAdOperationAction(action?: string | null): boolean {
+  return AD_OPERATION_ACTIONS.has(String(action ?? '').trim().toUpperCase());
+}
+
+function normalizeOperationActionStats(raw: unknown): OperationActionStat[] {
+  if (!Array.isArray(raw)) return [];
+  const result: OperationActionStat[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const row = item as OperationActionStat;
+    const action = typeof row.action === 'string' ? row.action.trim().toUpperCase() : '';
+    if (!action) continue;
+    const count = typeof row.count === 'number' ? row.count : Number(row.count);
+    if (!Number.isFinite(count) || count <= 0) continue;
+    const label = typeof row.label === 'string' && row.label.trim() ? row.label.trim() : null;
+    result.push({ action, label, count });
+  }
+  return result.sort((a, b) => b.count - a.count);
+}
+
+function hasOperationActionStatsKey(source: unknown): boolean {
+  if (!source || typeof source !== 'object') return false;
+  return 'operationActionStats' in source || 'operation_action_stats' in source;
+}
+
+function resolveOperationActionStatsFromResponse(res: unknown): { stats: OperationActionStat[]; hasField: boolean } {
+  const resObj = res && typeof res === 'object' ? res as Record<string, unknown> : null;
+  const data = resObj?.data;
+  const dataObj = data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : null;
+  const hasField = hasOperationActionStatsKey(dataObj) || hasOperationActionStatsKey(resObj);
+  const raw =
+    dataObj?.operationActionStats
+    ?? dataObj?.operation_action_stats
+    ?? resObj?.operationActionStats
+    ?? resObj?.operation_action_stats;
+  return { stats: normalizeOperationActionStats(raw), hasField };
+}
+
+function getOperationActionStatLabel(action: string, backendLabel?: string | null): string {
+  const normalizedAction = action.trim().toUpperCase();
+  if (isAdOperationAction(normalizedAction)) return '调整广告';
+  if (normalizedAction === 'JOIN_CAMPAIGN') return '参与活动';
+  const explicit = getExplicitLabel(backendLabel);
+  if (explicit) return explicit;
+  return getOperationActionLabel(normalizedAction) ?? normalizedAction;
+}
+
+function getOperationActionStatTone(action: string): ActionTipLevel {
+  const key = action.trim().toUpperCase();
+  if (key === 'LOWER_PRICE' || key === 'PAUSE_PURCHASE' || key === 'RAISE_PROFIT') return 'danger';
+  if (key === 'JOIN_CAMPAIGN' || key === 'URGENT_REPLENISH' || key === 'RAISE_PRICE_MODERATELY') return 'warning';
+  if (isAdOperationAction(key)) return 'primary';
+  return 'default';
+}
 
 interface PurchaseSuggestionData {
   dailySales?: number | null;
@@ -434,6 +552,8 @@ interface StoreProduct {
   purchase_suggestion?:  PurchaseSuggestionData | null;
   operationAdvice?:      OperationAdvice | null;
   operation_advice?:     OperationAdvice | null;
+  operationAdvices?:     OperationAdvice[] | null;
+  operation_advices?:    OperationAdvice[] | null;
   __dedupeHiddenCount?:  number;
   __dedupeHiddenPnks?:   string[];
 }
@@ -584,8 +704,86 @@ function renderOverviewCards<T extends string>({
   );
 }
 
-function renderProductClassActionTips(value: ProductClass) {
-  const tips = PRODUCT_CLASS_ACTION_TIPS[value] ?? PRODUCT_CLASS_ACTION_TIPS.all;
+function renderActionFilterTag({
+  action,
+  label,
+  tone,
+  active,
+  onActionClick,
+}: {
+  action: string;
+  label: string;
+  tone: ActionTipLevel;
+  active: boolean;
+  onActionClick: (action: string) => void;
+}) {
+  const baseStyle = ACTION_TIP_LEVEL_STYLE[tone];
+  return (
+    <Tag
+      role="button"
+      tabIndex={0}
+      onClick={() => onActionClick(action)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onActionClick(action);
+        }
+      }}
+      style={{
+        ...baseStyle,
+        marginInlineEnd: 0,
+        borderRadius: 999,
+        fontSize: 12,
+        lineHeight: '22px',
+        paddingInline: 9,
+        fontWeight: tone === 'danger' || active ? 700 : 600,
+        cursor: 'pointer',
+        borderWidth: active ? 2 : 1,
+        boxShadow: active ? '0 0 0 1px rgba(37, 99, 235, 0.15)' : undefined,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.filter = 'brightness(0.97)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.filter = 'none';
+      }}
+    >
+      {label}
+    </Tag>
+  );
+}
+
+function renderProductClassActionTips({
+  productClass,
+  actionStats,
+  hasOperationActionStatsField,
+  selectedAction,
+  onActionClick,
+  onClearActionFilter,
+}: ProductClassActionTipsProps) {
+  const fallbackTips = PRODUCT_CLASS_SUGGESTION_ACTIONS[productClass] ?? PRODUCT_CLASS_SUGGESTION_ACTIONS.all;
+  const fallbackActionTips = fallbackTips.filter((tip) => Boolean(tip.action));
+  const fallbackHintTips = fallbackTips.filter((tip) => !tip.action);
+
+  const useDynamic = actionStats.length > 0;
+  const useFallback = !hasOperationActionStatsField && !useDynamic;
+
+  const selectedLabel = selectedAction
+    ? (
+      actionStats.find((stat) => stat.action === selectedAction)
+        ? getOperationActionStatLabel(selectedAction, actionStats.find((stat) => stat.action === selectedAction)?.label)
+        : fallbackActionTips.find((tip) => tip.action === selectedAction)?.label
+          ?? getOperationActionStatLabel(selectedAction)
+    )
+    : undefined;
+
+  const subtitle = useDynamic
+    ? '根据当前分类真实运营动作统计，点击可筛选产品'
+    : useFallback
+      ? '以下为参考提示，部分动作暂无法筛选'
+      : '当前分类暂无可筛选运营动作';
+
+  const hasClickableActions = useDynamic || (useFallback && fallbackActionTips.length > 0);
 
   return (
     <div
@@ -599,28 +797,70 @@ function renderProductClassActionTips(value: ProductClass) {
         background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
         <span style={{ color: '#1e293b', fontSize: 13, fontWeight: 700 }}>当前分类建议</span>
-        <span style={{ color: '#94a3b8', fontSize: 12 }}>根据所选产品结构，优先处理以下动作</span>
+        <span style={{ color: '#94a3b8', fontSize: 12 }}>{subtitle}</span>
+        {selectedLabel ? (
+          <span style={{ color: '#64748b', fontSize: 12 }}>
+            当前已筛选：{selectedLabel}
+          </span>
+        ) : null}
+        {selectedAction ? (
+          <Button type="link" size="small" style={{ padding: 0, height: 'auto', fontSize: 12 }} onClick={onClearActionFilter}>
+            清除动作筛选
+          </Button>
+        ) : null}
       </div>
-      <Space size={[6, 6]} wrap>
-        {tips.map((tip) => (
-          <Tag
-            key={`${value}-${tip.text}`}
-            style={{
-              ...ACTION_TIP_LEVEL_STYLE[tip.level],
-              marginInlineEnd: 0,
-              borderRadius: 999,
-              fontSize: 12,
-              lineHeight: '22px',
-              paddingInline: 9,
-              fontWeight: tip.level === 'danger' ? 700 : 600,
-            }}
-          >
-            {tip.text}
-          </Tag>
-        ))}
-      </Space>
+      {useDynamic ? (
+        <Space size={[6, 6]} wrap>
+          {actionStats.map((stat) => {
+            const label = getOperationActionStatLabel(stat.action, stat.label);
+            const active = stat.action === selectedAction;
+            return (
+              <React.Fragment key={stat.action}>
+                {renderActionFilterTag({
+                  action: stat.action,
+                  label: `${label} ${stat.count}`,
+                  tone: getOperationActionStatTone(stat.action),
+                  active,
+                  onActionClick,
+                })}
+              </React.Fragment>
+            );
+          })}
+        </Space>
+      ) : useFallback ? (
+        <>
+          {fallbackActionTips.length > 0 ? (
+            <Space size={[6, 6]} wrap>
+              {fallbackActionTips.map((tip) => {
+                const active = tip.action === selectedAction;
+                return (
+                  <React.Fragment key={`${productClass}-${tip.action}`}>
+                    {renderActionFilterTag({
+                      action: tip.action as string,
+                      label: tip.label,
+                      tone: tip.tone,
+                      active,
+                      onActionClick,
+                    })}
+                  </React.Fragment>
+                );
+              })}
+            </Space>
+          ) : null}
+          {fallbackHintTips.length > 0 ? (
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, lineHeight: '20px', marginTop: fallbackActionTips.length > 0 ? 6 : 0 }}>
+              参考：{fallbackHintTips.map((tip) => tip.label).join(' · ')}
+            </Text>
+          ) : null}
+          {!hasClickableActions ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>暂无可筛选运营动作</Text>
+          ) : null}
+        </>
+      ) : (
+        <Text type="secondary" style={{ fontSize: 12 }}>暂无可筛选运营动作</Text>
+      )}
     </div>
   );
 }
@@ -777,12 +1017,123 @@ function getProductClassCount(summary: ClassificationSummary | null | undefined,
   return undefined;
 }
 
+function getOperationActionLabel(action: unknown): string | undefined {
+  if (isAdOperationAction(action != null ? String(action) : null)) return '调整广告';
+  if (action == null) return undefined;
+  const key = String(action).trim();
+  if (!key) return undefined;
+  return OPERATION_ACTION_LABEL_MAP[key as KnownOperationAction];
+}
+
+function getOperationActionShortLabel(action: unknown): string | undefined {
+  if (isAdOperationAction(action != null ? String(action) : null)) return '调整广告';
+  if (action == null) return undefined;
+  const key = String(action).trim();
+  if (!key) return undefined;
+  return OPERATION_ACTION_SHORT_LABEL_MAP[key as KnownOperationAction];
+}
+
+function isValidOperationAdvice(item: unknown): item is OperationAdvice {
+  if (!item || typeof item !== 'object') return false;
+  const o = item as OperationAdvice;
+  return Boolean(
+    o.title?.trim()
+    || (o.action != null && String(o.action).trim())
+    || o.reason?.trim()
+    || (o.priority != null && String(o.priority).trim()),
+  );
+}
+
+function resolveOperationAdvices(record: StoreProduct): OperationAdvice[] {
+  const arr = record.operationAdvices ?? record.operation_advices;
+  if (Array.isArray(arr)) {
+    return arr.filter(isValidOperationAdvice);
+  }
+  const single = record.operationAdvice ?? record.operation_advice ?? null;
+  if (isValidOperationAdvice(single)) return [single];
+  return [];
+}
+
+function normalizeOperationPriority(raw: unknown): OperationPriority | null {
+  const p = String(raw ?? '').trim().toUpperCase();
+  if (p === 'P0' || p === 'P1' || p === 'P2' || p === 'P3' || p === 'P4' || p === 'P5') {
+    return p;
+  }
+  return null;
+}
+
+function compareOperationAdvice(a: OperationAdvice, b: OperationAdvice): number {
+  const rank = (p: OperationPriority | null) => {
+    if (p === 'P0') return 0;
+    if (p === 'P1') return 1;
+    if (p === 'P2') return 2;
+    if (p === 'P3') return 3;
+    if (p === 'P4') return 4;
+    if (p === 'P5') return 5;
+    return 99;
+  };
+  return rank(normalizeOperationPriority(a.priority)) - rank(normalizeOperationPriority(b.priority));
+}
+
+function getSortedOperationAdvices(record: StoreProduct): OperationAdvice[] {
+  return resolveOperationAdvices(record).slice().sort(compareOperationAdvice);
+}
+
+function getOperationPriorityDisplay(priority: unknown): { label: string; style: React.CSSProperties } {
+  const normalized = normalizeOperationPriority(priority);
+  if (!normalized) {
+    return {
+      label: OPERATION_PRIORITY_UNKNOWN_STYLE.label,
+      style: {
+        color: OPERATION_PRIORITY_UNKNOWN_STYLE.color,
+        background: OPERATION_PRIORITY_UNKNOWN_STYLE.background,
+        borderColor: OPERATION_PRIORITY_UNKNOWN_STYLE.borderColor,
+      },
+    };
+  }
+  const entry = OPERATION_PRIORITY_STYLE_MAP[normalized];
+  return {
+    label: entry.label,
+    style: { color: entry.color, background: entry.background, borderColor: entry.borderColor },
+  };
+}
+
+function renderOperationPriorityTag(priority: unknown) {
+  const { label, style } = getOperationPriorityDisplay(priority);
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        fontSize: 11,
+        lineHeight: '18px',
+        height: 18,
+        padding: '0 5px',
+        borderRadius: 4,
+        border: '1px solid',
+        borderColor: style.borderColor ?? '#e2e8f0',
+        fontWeight: 600,
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+        ...style,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function getOperationAdviceLabels(operationAdvice: OperationAdvice): { fullLabel: string; shortLabel: string } {
-  const title = operationAdvice.title?.trim();
   const action = operationAdvice.action;
-  const actionLabel = action ? OPERATION_ACTION_LABEL_MAP[action] : undefined;
-  const shortActionLabel = action ? OPERATION_ACTION_SHORT_LABEL_MAP[action] : undefined;
-  const fullLabel = title || actionLabel || '未知动作';
+  if (isAdOperationAction(action != null ? String(action) : null)) {
+    return { fullLabel: '调整广告', shortLabel: '调整广告' };
+  }
+
+  const title = operationAdvice.title?.trim();
+  const actionLabel = getOperationActionLabel(action);
+  const shortActionLabel = getOperationActionShortLabel(action);
+  const rawActionStr = action != null && String(action).trim() ? String(action).trim() : '';
+  const fullLabel = title || actionLabel || rawActionStr || '未知动作';
 
   if (title?.includes('负毛利') && action === 'RAISE_PRICE') {
     return { fullLabel, shortLabel: '负毛利调价' };
@@ -792,7 +1143,169 @@ function getOperationAdviceLabels(operationAdvice: OperationAdvice): { fullLabel
     return { fullLabel, shortLabel: title };
   }
 
-  return { fullLabel, shortLabel: shortActionLabel || fullLabel };
+  return {
+    fullLabel,
+    shortLabel: shortActionLabel || actionLabel || title || rawActionStr || '未知动作',
+  };
+}
+
+function getOperationAdviceTags(operationAdvice: OperationAdvice): string[] {
+  if (!Array.isArray(operationAdvice.tags)) return [];
+  return operationAdvice.tags
+    .filter((tag) => typeof tag === 'string' && tag.trim())
+    .map((tag) => tag.trim());
+}
+
+function buildOperationAdviceMetricRows(
+  operationAdvice: OperationAdvice,
+  purchaseSuggestion?: PurchaseSuggestionData | null,
+) {
+  const metrics = operationAdvice.metrics && typeof operationAdvice.metrics === 'object'
+    ? operationAdvice.metrics
+    : null;
+  if (!metrics) return [];
+  return [
+    { label: '产品分类', value: metrics.productClass ?? metrics.product_class },
+    { label: '库存状态', value: metrics.stockStatus ?? metrics.stock_status },
+    { label: '平台库存', value: metrics.platformStock ?? metrics.platform_stock },
+    { label: '可售天数', value: metrics.stockDays ?? metrics.stock_days },
+    { label: '近30天销量', value: metrics.sales30d ?? metrics.sales_30d },
+    { label: '综合日销', value: metrics.comprehensiveSales ?? metrics.comprehensive_sales },
+    { label: '建议采购量', value: metrics.suggestAmount ?? metrics.suggest_amount ?? purchaseSuggestion?.suggestAmount },
+    { label: '预估毛利', value: metrics.estimatedProfit ?? metrics.estimated_profit },
+    { label: '毛利率', value: metrics.profitMarginPct ?? metrics.profit_margin_pct },
+    { label: '规则版本', value: metrics.ruleVersion ?? metrics.rule_version },
+  ]
+    .map((row) => ({ ...row, value: formatMetricValue(row.value) }))
+    .filter((row) => row.value != null);
+}
+
+function renderOperationAdvicePopoverContent(
+  advices: OperationAdvice[],
+  purchaseSuggestion?: PurchaseSuggestionData | null,
+) {
+  return (
+    <div style={{ minWidth: 280, maxWidth: 400, maxHeight: 360, overflowY: 'auto', fontSize: 13 }}>
+      {advices.map((advice, index) => {
+        const { fullLabel } = getOperationAdviceLabels(advice);
+        const reason = advice.reason?.trim();
+        const tags = getOperationAdviceTags(advice);
+        const metricRows = buildOperationAdviceMetricRows(advice, purchaseSuggestion);
+        return (
+          <div
+            key={`${fullLabel}-${index}`}
+            style={{
+              paddingBottom: index < advices.length - 1 ? 12 : 0,
+              marginBottom: index < advices.length - 1 ? 12 : 0,
+              borderBottom: index < advices.length - 1 ? '1px solid #f0f0f0' : undefined,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+              {renderOperationPriorityTag(advice.priority)}
+              <span style={{ color: '#1e293b', fontWeight: 700 }}>{fullLabel}</span>
+            </div>
+            <div style={{ marginBottom: tags.length > 0 || metricRows.length > 0 ? 8 : 0 }}>
+              <div style={{ color: '#64748b', marginBottom: 2 }}>原因</div>
+              <div style={{ color: '#1e293b', lineHeight: 1.5 }}>{reason || '暂无详细原因'}</div>
+            </div>
+            {tags.length > 0 && (
+              <div style={{ marginBottom: metricRows.length > 0 ? 8 : 0 }}>
+                <div style={{ color: '#64748b', marginBottom: 4 }}>标签</div>
+                <Space size={[4, 4]} wrap>
+                  {tags.map((tag) => (
+                    <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
+                  ))}
+                </Space>
+              </div>
+            )}
+            {metricRows.length > 0 && (
+              <div>
+                <div style={{ color: '#64748b', marginBottom: 4 }}>关键指标</div>
+                {metricRows.map((row) => (
+                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, lineHeight: 1.8 }}>
+                    <span style={{ color: '#64748b' }}>{row.label}</span>
+                    <span style={{ color: '#1e293b', fontWeight: 500, textAlign: 'right' }}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OperationAdviceCell({ record }: { record: StoreProduct }) {
+  const advices = getSortedOperationAdvices(record);
+  if (advices.length === 0) {
+    return <span style={{ color: '#94a3b8' }}>-</span>;
+  }
+
+  const visible = advices.slice(0, OPERATION_ADVICE_DISPLAY_LIMIT);
+  const overflow = advices.length - visible.length;
+  const purchaseSuggestion = record.purchaseSuggestion ?? record.purchase_suggestion ?? null;
+
+  return (
+    <Popover
+      title="运营建议详情"
+      content={renderOperationAdvicePopoverContent(advices, purchaseSuggestion)}
+      placement="top"
+    >
+      <div
+        style={{
+          cursor: 'pointer',
+          maxWidth: '100%',
+          margin: '0 auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          gap: 4,
+          lineHeight: '20px',
+        }}
+      >
+        {visible.map((advice, index) => {
+          const { shortLabel } = getOperationAdviceLabels(advice);
+          const normalized = normalizeOperationPriority(advice.priority);
+          const isHighPriority = normalized === 'P0' || normalized === 'P1';
+          return (
+            <div
+              key={`${shortLabel}-${index}`}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                maxWidth: '100%',
+                minWidth: 0,
+                lineHeight: '20px',
+              }}
+            >
+              {renderOperationPriorityTag(advice.priority)}
+              <span
+                style={{
+                  color: '#111827',
+                  fontWeight: isHighPriority ? 700 : 600,
+                  fontSize: 12,
+                  lineHeight: '20px',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  maxWidth: 100,
+                }}
+              >
+                {shortLabel}
+              </span>
+            </div>
+          );
+        })}
+        {overflow > 0 && (
+          <span style={{ color: '#64748b', fontSize: 12, fontWeight: 500, lineHeight: '18px' }}>
+            +{overflow}
+          </span>
+        )}
+      </div>
+    </Popover>
+  );
 }
 
 export default function PlatformProducts({ initialSearch, initialShopId }: PlatformProductsProps) {
@@ -813,9 +1326,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const buyBoxGroupRef = useRef<BuyBoxGroupFilter>('ALL');
   const linkTypeFilterRef = useRef<LinkTypeFilter>('ALL');
   const stockGroupRef = useRef<StockGroupFilter>('ALL');
+  const [operationActionFilter, setOperationActionFilter] = useState<string | undefined>();
+  const operationActionFilterRef = useRef<string | undefined>(undefined);
+  const [operationActionStats, setOperationActionStats] = useState<OperationActionStat[]>([]);
+  const [hasOperationActionStatsField, setHasOperationActionStatsField] = useState(false);
   buyBoxGroupRef.current = buyBoxGroup;
   linkTypeFilterRef.current = linkTypeFilter;
   stockGroupRef.current = stockGroup;
+  operationActionFilterRef.current = operationActionFilter;
   // 关联状态筛选：'all' | 'mapped' | 'unmapped'
   const [mappingStatus, setMappingStatus] = useState<'all' | 'mapped' | 'unmapped'>('all');
 
@@ -954,6 +1472,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       setProducts([]);
       setTotalCount(0);
       setDedupeFilteredCount(0);
+      setOperationActionStats([]);
+      setHasOperationActionStatsField(false);
       return;
     }
     const token = localStorage.getItem('token');
@@ -979,14 +1499,30 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       if (effectiveBuyBoxGroup !== 'ALL') params.buyBoxGroup = effectiveBuyBoxGroup;
       if (effectiveLinkType !== 'ALL') params.linkType = effectiveLinkType;
       if (effectiveStockGroup !== 'ALL') params.stockGroup = effectiveStockGroup;
+      const effectiveOperationAction = opts && 'operationAction' in opts
+        ? opts.operationAction
+        : operationActionFilterRef.current;
+      if (effectiveOperationAction) params.operationAction = effectiveOperationAction;
       if (opts?.refreshSales) params.refreshSales = 1;
       params._t = Date.now();
       const { data: res } = await request.get<{
         code: number;
-        data?: StoreProduct[] | { list?: StoreProduct[]; total?: number; totalCount?: number; currency?: string };
+        data?: StoreProduct[] | {
+          list?: StoreProduct[];
+          total?: number;
+          totalCount?: number;
+          currency?: string;
+          operationActionStats?: OperationActionStat[] | null;
+          operation_action_stats?: OperationActionStat[] | null;
+        };
         currency?: string;
+        operationActionStats?: OperationActionStat[] | null;
+        operation_action_stats?: OperationActionStat[] | null;
       }>('/store-products', { params });
       if (res.code === 200) {
+        const { stats, hasField } = resolveOperationActionStatsFromResponse(res);
+        setOperationActionStats(stats);
+        setHasOperationActionStatsField(hasField);
         const raw = res.data;
         const list = Array.isArray(raw)
           ? raw
@@ -1006,11 +1542,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         setProducts([]);
         setTotalCount(0);
         setDedupeFilteredCount(0);
+        setOperationActionStats([]);
+        setHasOperationActionStatsField(false);
       }
     } catch (err) {
       setProducts([]);
       setTotalCount(0);
       setDedupeFilteredCount(0);
+      setOperationActionStats([]);
+      setHasOperationActionStatsField(false);
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status !== 401) {
         message.error('加载平台产品失败');
@@ -1271,6 +1811,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   useEffect(() => {
     setPendingUpdateCount(0);
     setPage(1);
+    operationActionFilterRef.current = undefined;
+    setOperationActionFilter(undefined);
     const kw = initialSearch?.trim();
     if (kw) {
       setSearchKeyword(kw);
@@ -1373,6 +1915,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts, fetchInventory, fetchClassificationSummary, fetchStoreOverview]);
 
   const handleProductStructureCardClick = useCallback((value: ProductClass) => {
+    operationActionFilterRef.current = undefined;
+    setOperationActionFilter(undefined);
     setProductClass(value);
     setPage(1);
     fetchProducts(shopId, appliedKeyword, {
@@ -1382,8 +1926,40 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       sortOrder,
       mappingStatus,
       productClass: value,
+      operationAction: undefined,
     });
   }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, fetchProducts]);
+
+  const handleOperationActionClick = useCallback((action: string) => {
+    const next = operationActionFilter === action ? undefined : action;
+    operationActionFilterRef.current = next;
+    setOperationActionFilter(next);
+    setPage(1);
+    fetchProducts(shopId, appliedKeyword, {
+      page: 1,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+      operationAction: next,
+    });
+  }, [operationActionFilter, shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts]);
+
+  const handleClearOperationActionFilter = useCallback(() => {
+    operationActionFilterRef.current = undefined;
+    setOperationActionFilter(undefined);
+    setPage(1);
+    fetchProducts(shopId, appliedKeyword, {
+      page: 1,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+      operationAction: undefined,
+    });
+  }, [shopId, appliedKeyword, pageSize, sortBy, sortOrder, mappingStatus, productClass, fetchProducts]);
 
 
 
@@ -1906,104 +2482,10 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     {
       title: '运营建议',
       key: 'operationAdvice',
-      width: 150,
+      width: 190,
       align: 'center',
       fixed: 'right' as const,
-      render: (_: unknown, r: StoreProduct) => {
-        const operationAdvice = r.operationAdvice ?? r.operation_advice ?? null;
-        if (!operationAdvice) return <span style={{ color: '#94a3b8' }}>-</span>;
-
-        const rawPriority = operationAdvice.priority;
-        const priorityConfig = rawPriority ? OPERATION_PRIORITY_MAP[rawPriority] : null;
-        const rawAction = operationAdvice.action;
-        const { fullLabel, shortLabel } = getOperationAdviceLabels(operationAdvice);
-        const reason = operationAdvice.reason?.trim();
-        const tags = Array.isArray(operationAdvice.tags)
-          ? operationAdvice.tags.filter((tag) => typeof tag === 'string' && tag.trim()).map((tag) => tag.trim())
-          : [];
-        const metrics = operationAdvice.metrics && typeof operationAdvice.metrics === 'object'
-          ? operationAdvice.metrics
-          : null;
-        const metricRows = metrics ? [
-          { label: '产品分类', value: metrics.productClass ?? metrics.product_class },
-          { label: '库存状态', value: metrics.stockStatus ?? metrics.stock_status },
-          { label: '平台库存', value: metrics.platformStock ?? metrics.platform_stock },
-          { label: '可售天数', value: metrics.stockDays ?? metrics.stock_days },
-          { label: '近30天销量', value: metrics.sales30d ?? metrics.sales_30d },
-          { label: '综合日销', value: metrics.comprehensiveSales ?? metrics.comprehensive_sales },
-          { label: '建议采购量', value: metrics.suggestAmount ?? metrics.suggest_amount ?? r.purchaseSuggestion?.suggestAmount },
-          { label: '预估毛利', value: metrics.estimatedProfit ?? metrics.estimated_profit },
-          { label: '毛利率', value: metrics.profitMarginPct ?? metrics.profit_margin_pct },
-          { label: '规则版本', value: metrics.ruleVersion ?? metrics.rule_version },
-        ]
-          .map((row) => ({ ...row, value: formatMetricValue(row.value) }))
-          .filter((row) => row.value != null) : [];
-        const weak = rawAction === 'OBSERVE' || rawPriority === 'P3';
-
-        const content = (
-          <div style={{ minWidth: 260, maxWidth: 360, fontSize: 13 }}>
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ color: '#64748b' }}>运营建议</div>
-              <div style={{ color: '#1e293b', fontWeight: 700 }}>{fullLabel}</div>
-            </div>
-            {priorityConfig && (
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                <span style={{ color: '#64748b' }}>优先级</span>
-                <Tag color={priorityConfig.color} style={{ margin: 0 }}>{priorityConfig.label}</Tag>
-              </div>
-            )}
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ color: '#64748b' }}>原因</div>
-              <div style={{ color: '#1e293b', lineHeight: 1.5 }}>{reason || '暂无详细原因'}</div>
-            </div>
-            {tags.length > 0 && (
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ color: '#64748b', marginBottom: 4 }}>标签</div>
-                <Space size={[4, 4]} wrap>
-                  {tags.map((tag) => (
-                    <Tag key={tag} style={{ margin: 0 }}>{tag}</Tag>
-                  ))}
-                </Space>
-              </div>
-            )}
-            {metricRows.length > 0 && (
-              <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 8 }}>
-                <div style={{ color: '#64748b', marginBottom: 4 }}>关键指标</div>
-                {metricRows.map((row) => (
-                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, lineHeight: 1.8 }}>
-                    <span style={{ color: '#64748b' }}>{row.label}</span>
-                    <span style={{ color: '#1e293b', fontWeight: 500, textAlign: 'right' }}>{row.value}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-
-        return (
-          <Popover title="运营建议详情" content={content} placement="top">
-            <div style={{ cursor: 'pointer', maxWidth: 140, margin: '0 auto' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, marginBottom: reason ? 2 : 0 }}>
-                {priorityConfig && <Tag color={priorityConfig.color} style={{ margin: 0 }}>{priorityConfig.label}</Tag>}
-                <span style={{
-                  color: weak ? '#64748b' : '#1e293b',
-                  fontWeight: rawPriority === 'P0' || rawPriority === 'P1' ? 700 : 600,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}>
-                  {shortLabel}
-                </span>
-              </div>
-              {reason && (
-                <div style={{ color: '#64748b', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {reason}
-                </div>
-              )}
-            </div>
-          </Popover>
-        );
-      },
+      render: (_: unknown, r: StoreProduct) => <OperationAdviceCell record={r} />,
     },
   ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected]);
 
@@ -2300,6 +2782,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             setLinkTypeFilter('ALL');
             setStockGroup('ALL');
             setMappingStatus('all');
+            operationActionFilterRef.current = undefined;
+            setOperationActionFilter(undefined);
             setSearchKeyword('');
             setAppliedKeyword('');
             setPage(1);
@@ -2313,6 +2797,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
               buyBoxGroup: 'ALL',
               linkType: 'ALL',
               stockGroup: 'ALL',
+              operationAction: undefined,
             });
             fetchClassificationSummary(shopId);
             fetchStoreOverview(shopId);
@@ -2346,7 +2831,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
               onCardClick: handleProductStructureCardClick,
             })}
           </div>
-          {renderProductClassActionTips(productClass)}
+          {renderProductClassActionTips({
+            productClass,
+            actionStats: operationActionStats,
+            hasOperationActionStatsField,
+            selectedAction: operationActionFilter,
+            onActionClick: handleOperationActionClick,
+            onClearActionFilter: handleClearOperationActionFilter,
+          })}
         </div>
       </div>
 
