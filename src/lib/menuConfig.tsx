@@ -7,7 +7,7 @@
  * 规则：
  *   - 父级分组节点不设 code，子节点过滤后若全部被移除则父节点自动隐藏。
  *   - 叶子节点的 code 必须与后端 Permission 表的 code 字段严格对齐。
- *   - 无 code 的叶子节点（如仪表盘）对所有角色始终可见。
+ *   - 仪表盘左侧菜单可见性由 Dashboard.tsx 组合规则控制；权限树见 DASHBOARD_PERMISSION_ITEMS。
  */
 import type { ReactNode } from 'react';
 import {
@@ -16,7 +16,6 @@ import {
   StarOutlined,
   DatabaseOutlined,
   AppstoreOutlined,
-  ShoppingOutlined,
   TruckOutlined,
   ShoppingCartOutlined,
   FileTextOutlined,
@@ -28,8 +27,15 @@ import {
   ApiOutlined,
   BulbOutlined,
   BarChartOutlined,
+  LineChartOutlined,
   HomeOutlined,
 } from '@ant-design/icons';
+
+/** 权限树专用：挂载在菜单叶子下的操作权限（不进入侧边栏） */
+export interface AppMenuAction {
+  code:  string;
+  label: string;
+}
 
 export interface AppMenuItem {
   key:       string;
@@ -37,8 +43,39 @@ export interface AppMenuItem {
   label:     string;
   /** 与后端 Permission.code 严格对齐；无此字段 = 始终可见 */
   code?:     string;
+  /** 权限树专用：操作级权限，挂在对应菜单叶子下 */
+  actions?:  AppMenuAction[];
   children?: AppMenuItem[];
 }
+
+/** 仪表盘权限树（仅用于角色管理分配，不影响侧边栏结构） */
+export const DASHBOARD_PERMISSION_ITEMS: AppMenuItem[] = [
+  {
+    key: 'dashboard-perm',
+    label: '仪表盘',
+    code: 'MENU_DASHBOARD',
+    children: [
+      { key: 'dashboard-daily', label: '每日登记（页面访问）', code: 'MENU_DASHBOARD_DAILY' },
+      {
+        key: 'dashboard-task-center',
+        label: '个人任务（页面访问）',
+        code: 'MENU_DASHBOARD_TASK_CENTER',
+        actions: [
+          { code: 'ACTION_DASHBOARD_REMINDER_TEMPLATE_MANAGE', label: '管理提醒模板（操作权限）' },
+        ],
+      },
+      {
+        key: 'dashboard-company',
+        label: '团队任务（页面访问）',
+        code: 'MENU_DASHBOARD_COMPANY_MANAGEMENT',
+        actions: [
+          { code: 'ACTION_DASHBOARD_COMPANY_TASK_MANAGE', label: '团队任务-任务管理（操作权限）' },
+          { code: 'ACTION_DASHBOARD_COMPANY_WEEKLY_AI_GENERATE', label: '团队任务-生成AI周报（操作权限）' },
+        ],
+      },
+    ],
+  },
+];
 
 export const ALL_MENU_ITEMS: AppMenuItem[] = [
   { key: 'dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
@@ -59,7 +96,7 @@ export const ALL_MENU_ITEMS: AppMenuItem[] = [
     label: '平台数据',
     children: [
       { key: 'platform-products', icon: <AppstoreOutlined />, label: '平台产品',   code: 'MENU_PLATFORM_PRODUCTS' },
-      { key: 'platform-orders',   icon: <ShoppingOutlined />, label: '平台订单',   code: 'MENU_PLATFORM_ORDERS'   },
+      { key: 'order-daily-dashboard', icon: <LineChartOutlined />, label: '订单日报', code: 'MENU_PLATFORM_ORDERS' },
       { key: 'fbe-shipments',     icon: <TruckOutlined />,    label: 'FBE发货', code: 'MENU_FBE_SHIPMENTS'     },
     ],
   },
@@ -97,7 +134,9 @@ export const ALL_MENU_ITEMS: AppMenuItem[] = [
  *
  * - 父级分组节点：key = `group:${item.key}`，title = label（不可勾选，仅展示分组）
  * - 叶子节点：key = code，title = label（可勾选，提交给后端）
- * - 无 code 的叶子节点（始终可见项，如仪表盘）不纳入权限树
+ * - 带 code 的父节点：key = code，子节点挂在其下（如仪表盘）
+ * - 叶子节点可携带 actions 作为子操作权限
+ * - 无 code 且无 children 的节点不纳入权限树
  */
 export interface PermTreeNode {
   key:       string;
@@ -107,24 +146,34 @@ export interface PermTreeNode {
   isGroup?:  boolean;
 }
 
-export function buildPermissionTree(items: AppMenuItem[]): PermTreeNode[] {
+export function buildPermissionTree(items: AppMenuItem[], seenCodes = new Set<string>()): PermTreeNode[] {
   const result: PermTreeNode[] = [];
   for (const item of items) {
     if (item.children && item.children.length > 0) {
-      const children = buildPermissionTree(item.children);
-      if (children.length > 0) {
+      const children = buildPermissionTree(item.children, seenCodes);
+      if (children.length === 0) continue;
+      if (item.code && !seenCodes.has(item.code)) {
+        seenCodes.add(item.code);
+        result.push({ key: item.code, title: item.label, children });
+      } else if (!item.code) {
         result.push({
-          key:      `group:${item.key}`,
-          title:    item.label,
-          isGroup:  true,
+          key:     `group:${item.key}`,
+          title:   item.label,
+          isGroup: true,
           children,
         });
       }
-    } else if (item.code) {
-      // 叶子节点：只有携带 code 的节点才纳入权限树
-      result.push({ key: item.code, title: item.label });
+    } else if (item.code && !seenCodes.has(item.code)) {
+      seenCodes.add(item.code);
+      const node: PermTreeNode = { key: item.code, title: item.label };
+      if (item.actions && item.actions.length > 0) {
+        node.children = item.actions.map((action) => ({
+          key:   action.code,
+          title: action.label,
+        }));
+      }
+      result.push(node);
     }
-    // 无 code 且无 children 的节点（如仪表盘）跳过，不纳入权限树
   }
   return result;
 }

@@ -63,12 +63,17 @@ export function isAdminUser(): boolean {
   return false;
 }
 
+/** 严格判断是否为超级管理员（不含 permissions 缺失等宽泛兼容） */
+export function isSuperAdminRole(user?: StoredUser | null): boolean {
+  const target = user ?? getStoredUser();
+  if (target?.role?.isAdmin === true) return true;
+  if (target?.role?.name === SUPER_ADMIN_ROLE_NAME) return true;
+  return false;
+}
+
 /** 仅超级管理员（不含「老会话 permissions 为空」的宽泛兼容），用于高危操作入口 */
 export function isSuperAdminUser(): boolean {
-  const user = getStoredUser();
-  if (user?.role?.isAdmin === true) return true;
-  if (user?.role?.name === SUPER_ADMIN_ROLE_NAME) return true;
-  return false;
+  return isSuperAdminRole(getStoredUser());
 }
 
 // ── 检查单个权限码 ─────────────────────────────────────────────
@@ -77,6 +82,25 @@ export function hasPermission(code: string): boolean {
   const perms = getStoredPermissions();
   if (!perms) return true;
   return perms.includes(code);
+}
+
+/** 仪表盘左侧菜单：拥有任一子权限即可见 */
+export const DASHBOARD_MENU_PERMISSION_CODES = [
+  'MENU_DASHBOARD',
+  'MENU_DASHBOARD_DAILY',
+  'MENU_DASHBOARD_TASK_CENTER',
+  'MENU_DASHBOARD_COMPANY_MANAGEMENT',
+] as const;
+
+export function hasAnyPermission(codes: readonly string[]): boolean {
+  return codes.some((code) => hasPermission(code));
+}
+
+export function hasDashboardMenuAccess(): boolean {
+  if (isAdminUser()) return true;
+  const perms = getStoredPermissions();
+  if (!perms) return false;
+  return DASHBOARD_MENU_PERMISSION_CODES.some((code) => perms.includes(code));
 }
 
 // ── 从 /me 接口更新本地缓存 ────────────────────────────────────
