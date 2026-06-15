@@ -459,6 +459,8 @@ interface StoreProduct {
   // ERP 内部闭环在途量（以发货单为准，补货决策主依据）
   inTransitQuantity?: number | null;
   in_transit_quantity?: number | null;
+  inTransitScope?: string | null;
+  in_transit_scope?: string | null;
   // eMAG 平台同步的在途量（用于对账）
   stockInTransit?: number | null;
   stock_in_transit?: number | null;
@@ -486,6 +488,7 @@ interface StoreProduct {
   rejectionReason?: string | null;
   // 后端直接返回的映射关系字段（比 inventoryMap 本地字典更权威）
   mapped_inventory_sku?: string | null;
+  mappedInventorySku?: string | null;
   inventorySku?: string | null;
   inventory_sku?: string | null;
   inventoryId?: number | null;
@@ -582,7 +585,7 @@ interface PlatformProductsProps {
 }
 
 function getMappedInventorySku(product: StoreProduct): string {
-  return String(product.mapped_inventory_sku ?? product.inventorySku ?? product.inventory_sku ?? '').trim();
+  return String(product.mapped_inventory_sku ?? product.mappedInventorySku ?? product.inventorySku ?? product.inventory_sku ?? '').trim();
 }
 
 function getPlatformProductPnk(product: StoreProduct): string {
@@ -2344,7 +2347,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       title: (
         <span>
           在途库存
-          <Tooltip title="ERP发货量：以 FBE 发货单为准，为补货决策主依据；eMAG平台量：平台同步识别的在途数，用于对账">
+          <Tooltip title="在途库存：当前平台产品维度的 FBE 已发货未入仓数量；eMAG平台量用于对账">
             <InfoCircleOutlined style={{ marginLeft: 4, color: '#94a3b8', fontSize: 12, cursor: 'help' }} />
           </Tooltip>
         </span>
@@ -2366,7 +2369,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         return (
           <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
             {/* ERP 主数据 */}
-            <Tooltip title={`ERP 发货单在途：${erp} 件`}>
+            <Tooltip title={`当前平台产品维度的 FBE 已发货未入仓数量：${erp} 件`}>
               <span style={{
                 color: erp > 0 ? '#2563eb' : '#94a3b8',
                 fontWeight: 700,
