@@ -11,6 +11,7 @@ import RepeatPurchaseModal from '../components/RepeatPurchaseModal';
 import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
 import { CreateFbeShipmentModal } from './FbeShipments';
 import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/ProfitBreakdownPopover';
+import PlatformProductPriceChangeModal from '../components/PlatformProductPriceChangeModal';
 
 const { Text } = Typography;
 
@@ -122,6 +123,12 @@ interface OperationAdvice {
   reason?: string | null;
   tags?: string[] | null;
   metrics?: Record<string, unknown> | null;
+}
+
+interface PriceActionEligibility {
+  canChangePrice?: boolean;
+  code?: string | null;
+  message?: string | null;
 }
 
 const OPERATION_ADVICE_DISPLAY_LIMIT = 3;
@@ -426,6 +433,10 @@ interface PurchaseSuggestionData {
 
 interface StoreProduct {
   id: number;
+  storeProductId?: number | null;
+  store_product_id?: number | null;
+  shopId?: number | null;
+  shop_id?: number | null;
   pnk?: string | null;
   sku?: string | null;
   /** 后端修正后的真实卖家 SKU（eMAG vendorSku 字段），优先展示 */
@@ -449,6 +460,10 @@ interface StoreProduct {
   imageFetching?: boolean;
   productUrl?: string | null;
   product_url?: string | null;
+  emagOfferId?: string | number | null;
+  emag_offer_id?: string | number | null;
+  offerId?: string | number | null;
+  offer_id?: string | number | null;
   price?: number | null;
   sale_price?: number | null;
   salePrice?: number | null;
@@ -527,6 +542,8 @@ interface StoreProduct {
   link_type?: string | null;
   linkTypeLabel?: string | null;
   link_type_label?: string | null;
+  priceActionEligibility?: PriceActionEligibility | null;
+  price_action_eligibility?: PriceActionEligibility | null;
   contentPermission?: string | null;
   content_permission?: string | null;
   contentPermissionLabel?: string | null;
@@ -887,6 +904,15 @@ function getLinkTypeTagStyle(linkType: string): React.CSSProperties {
   if (linkType === 'RESELL') return LINK_TAG_STYLE_MAP.resell;
   if (linkType === 'OWN_BRAND_RESELL') return LINK_TAG_STYLE_MAP.ownBrandResell;
   return LINK_TAG_STYLE_MAP.default;
+}
+
+function getPriceActionDisabledReason(record: StoreProduct): string | null {
+  const linkType = normalizeEnumValue(record.linkType ?? record.link_type);
+  if (!['SELF_BUILT', 'RESELL', 'OWN_BRAND_RESELL'].includes(linkType)) {
+    return '链接类型待确认';
+  }
+  // offerId 是否缺失交由 price/preview 后端判断 MISSING_EMAG_OFFER_ID（列表接口未必返回 offerId 字段）
+  return null;
 }
 
 function renderCompactInfoTag(label: string, style: React.CSSProperties) {
@@ -1375,6 +1401,9 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const [planModalOpen,   setPlanModalOpen]   = useState(false);
   // FBE 发货单弹窗
   const [fbeModalOpen,    setFbeModalOpen]    = useState(false);
+  // 手动改价弹窗
+  const [priceModalOpen,  setPriceModalOpen]  = useState(false);
+  const [priceTarget,     setPriceTarget]     = useState<StoreProduct | null>(null);
   const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
   const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
@@ -1622,6 +1651,47 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     setPasteTarget(null);
     setPasteUrl('');
   }, []);
+
+  const openPriceChangeModal = useCallback((product: StoreProduct) => {
+    setPriceTarget(product);
+    setPriceModalOpen(true);
+  }, []);
+
+  const closePriceChangeModal = useCallback(() => {
+    setPriceModalOpen(false);
+    setPriceTarget(null);
+  }, []);
+
+  const handlePriceChangeSuccess = useCallback(() => {
+    closePriceChangeModal();
+    fetchProducts(shopId, appliedKeyword, {
+      page,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+      buyBoxGroup,
+      linkType: linkTypeFilter,
+      stockGroup,
+      operationAction: operationActionFilter,
+    });
+  }, [
+    closePriceChangeModal,
+    fetchProducts,
+    shopId,
+    appliedKeyword,
+    page,
+    pageSize,
+    sortBy,
+    sortOrder,
+    mappingStatus,
+    productClass,
+    buyBoxGroup,
+    linkTypeFilter,
+    stockGroup,
+    operationActionFilter,
+  ]);
 
   const handleSyncUrls = useCallback(async () => {
     if (!shopId) return;
@@ -2266,10 +2336,29 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       render: (_: unknown, r: StoreProduct) => {
         const v = r.price ?? r.sale_price ?? r.salePrice;
         const c = r.currency ?? '';
-        if (v == null) return <span>—</span>;
-        const num = Number(v).toFixed(2);
-        const suffix = (c ?? '').trim();
-        return <span>{suffix ? `${num} ${suffix}` : num}</span>;
+        const disabledReason = getPriceActionDisabledReason(r);
+        let priceText = '—';
+        if (v != null) {
+          const num = Number(v).toFixed(2);
+          const suffix = (c ?? '').trim();
+          priceText = suffix ? `${num} ${suffix}` : num;
+        }
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, lineHeight: 1.3 }}>
+            <span>{priceText}</span>
+            <Tooltip title={disabledReason || undefined}>
+              <Button
+                size="small"
+                type="link"
+                disabled={!!disabledReason}
+                onClick={() => openPriceChangeModal(r)}
+                style={{ padding: 0, height: 20, fontSize: 12 }}
+              >
+                改价
+              </Button>
+            </Tooltip>
+          </div>
+        );
       },
     },
     {
@@ -2490,7 +2579,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       fixed: 'right' as const,
       render: (_: unknown, r: StoreProduct) => <OperationAdviceCell record={r} />,
     },
-  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected]);
+  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected, openPriceChangeModal]);
 
   /** 纯数字且不足 13 位时提示（EAN 通常为 13 位，含前导零场景由后端统一） */
   const searchEanHint = useMemo(() => {
@@ -2900,6 +2989,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         products={selectedRows}
         onCancel={() => setFbeModalOpen(false)}
         onSuccess={() => { setFbeModalOpen(false); setSelectedRowKeys([]); setSelectedRows([]); }}
+      />
+
+      {/* 手动改价弹窗 */}
+      <PlatformProductPriceChangeModal
+        open={priceModalOpen}
+        product={priceTarget}
+        currentShopId={shopId}
+        onCancel={closePriceChangeModal}
+        onSuccess={handlePriceChangeSuccess}
       />
 
       {/* 手动贴图地址弹窗 */}
