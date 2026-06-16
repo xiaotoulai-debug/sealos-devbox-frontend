@@ -7,6 +7,7 @@ import {
   Spin,
   Tag,
   Typography,
+  message,
 } from 'antd';
 import request from '../lib/request';
 
@@ -63,6 +64,18 @@ interface GrabCartPreviewData {
   currency?: string | null;
 }
 
+interface GrabCartExecuteData {
+  status?: string | null;
+  code?: string | number | null;
+  message?: string | null;
+  errorMessage?: string | null;
+  noEmagWriteExecuted?: boolean | null;
+  logId?: number | string | null;
+  oldSalePriceExVat?: number | null;
+  newSalePriceExVat?: number | null;
+  payloadPreview?: Record<string, unknown> | null;
+}
+
 interface ApiResponse<T> {
   code: number | string;
   data?: T | null;
@@ -74,7 +87,10 @@ interface PlatformProductGrabCartPreviewModalProps {
   product: StoreProductGrabCartTarget | null;
   currentShopId: number | null;
   onCancel: () => void;
+  onSuccess?: () => void;
 }
+
+const DEFAULT_GRAB_REASON = '运营手动抢购物车';
 
 function toNumber(value: unknown): number | null {
   if (value == null || value === '') return null;
@@ -189,9 +205,51 @@ function renderCostStatus(costStatus?: string | null) {
   return <Tag>{value}</Tag>;
 }
 
-function getBackendErrorMessage(err: unknown, fallback: string): string {
-  const e = err as { response?: { data?: { message?: string; errorMessage?: string } }; message?: string };
-  return e.response?.data?.message || e.response?.data?.errorMessage || e.message || fallback;
+function normalizeEnumValue(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function isGrabExecuteAllowed(preview: GrabCartPreviewData | null): boolean {
+  if (!preview || preview.canGrab !== true) return false;
+  if (normalizeEnumValue(preview.code) !== 'OK') return false;
+  const price = preview.suggestedGrabPriceExVat;
+  return price != null && Number(price) > 0;
+}
+
+function normalizeGrabCartExecute(raw: unknown): GrabCartExecuteData | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const data = raw as Record<string, unknown>;
+  return {
+    status: pickString(data.status),
+    code: pickString(data.code) ?? (data.code != null ? String(data.code) : null),
+    message: pickString(data.message, data.errorMessage, data.error_message),
+    errorMessage: pickString(data.errorMessage, data.error_message),
+    noEmagWriteExecuted: pickBool(data.noEmagWriteExecuted, data.no_emag_write_executed),
+    logId: (data.logId ?? data.log_id) as number | string | null | undefined,
+    oldSalePriceExVat: toNumber(data.oldSalePriceExVat ?? data.old_sale_price_ex_vat),
+    newSalePriceExVat: toNumber(data.newSalePriceExVat ?? data.new_sale_price_ex_vat),
+    payloadPreview: (data.payloadPreview ?? data.payload_preview) as Record<string, unknown> | null | undefined,
+  };
+}
+
+function getBackendErrorMessage(err: unknown, fallback: string): { status?: number; message: string; data?: Record<string, unknown> | null } {
+  const e = err as {
+    response?: { status?: number; data?: Record<string, unknown> & { message?: string; errorMessage?: string } };
+    message?: string;
+  };
+  const status = e.response?.status;
+  const data = e.response?.data ?? null;
+  const msg = data?.message || data?.errorMessage || e.message || fallback;
+  return { status, message: msg, data };
+}
+
+function formatPayloadPreview(payload: Record<string, unknown> | null | undefined): string {
+  if (!payload || typeof payload !== 'object') return '-';
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
 }
 
 export default function PlatformProductGrabCartPreviewModal({
@@ -199,9 +257,13 @@ export default function PlatformProductGrabCartPreviewModal({
   product,
   currentShopId,
   onCancel,
+  onSuccess,
 }: PlatformProductGrabCartPreviewModalProps) {
   const [loading, setLoading] = useState(false);
+  const [executing, setExecuting] = useState(false);
   const [preview, setPreview] = useState<GrabCartPreviewData | null>(null);
+  const [executeResult, setExecuteResult] = useState<GrabCartExecuteData | null>(null);
+  const [executeBlocked, setExecuteBlocked] = useState<GrabCartExecuteData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const storeProductId = useMemo(() => resolveStoreProductId(product), [product]);
@@ -212,10 +274,15 @@ export default function PlatformProductGrabCartPreviewModal({
   const warnings = [...toWarningList(preview?.costWarnings), ...toWarningList(preview?.warnings)];
   const blockCode = preview?.code ?? null;
   const blockMessage = preview?.message ?? null;
+  const canExecuteGrab = isGrabExecuteAllowed(preview);
+  const confirmedPriceExVat = preview?.suggestedGrabPriceExVat ?? null;
 
   useEffect(() => {
     if (!open) return;
     setPreview(null);
+    setExecuteResult(null);
+    setExecuteBlocked(null);
+    setExecuting(false);
     setErrorMessage(null);
 
     if (!storeProductId) {
@@ -244,7 +311,7 @@ export default function PlatformProductGrabCartPreviewModal({
         }
       } catch (err) {
         if (!cancelled) {
-          setErrorMessage(getBackendErrorMessage(err, '抢车预览失败'));
+          setErrorMessage(getBackendErrorMessage(err, '抢车预览失败').message);
           setPreview(null);
         }
       } finally {
@@ -258,13 +325,99 @@ export default function PlatformProductGrabCartPreviewModal({
     };
   }, [open, resolvedShopId, storeProductId]);
 
+  const executeGrabCart = async () => {
+    if (!storeProductId || !resolvedShopId || !preview || confirmedPriceExVat == null) return;
+    setExecuting(true);
+    setExecuteResult(null);
+    setExecuteBlocked(null);
+    try {
+      const { data: res } = await request.post<ApiResponse<Record<string, unknown>>>(
+        `/store-products/${storeProductId}/grab-cart/execute`,
+        {
+          shopId: resolvedShopId,
+          confirmedPriceExVat,
+          reason: DEFAULT_GRAB_REASON,
+        },
+      );
+      const data = normalizeGrabCartExecute(res.data);
+      const status = normalizeEnumValue(data?.status ?? data?.code);
+      const blocked = res.code === 409 || status === 'BLOCKED' || normalizeEnumValue(data?.code) === 'BLOCKED';
+
+      if (blocked && data) {
+        setExecuteBlocked(data);
+        message.error(data.message || data.errorMessage || '执行被阻断');
+        return;
+      }
+
+      if (res.code === 200 && data) {
+        setExecuteResult(data);
+        const noWrite = data.noEmagWriteExecuted === true || status === 'DRY_RUN_ONLY' || status === 'SKIPPED';
+        if (status === 'SUCCESS' && !noWrite) {
+          message.success('抢车改价已提交成功');
+          onSuccess?.();
+        } else if (status === 'DRY_RUN_ONLY' || status === 'SKIPPED' || noWrite) {
+          message.warning('安全模式：已模拟执行，未真实改价，未写入 eMAG');
+        } else if (status === 'FAILED') {
+          message.error(data.message || data.errorMessage || '抢车执行失败');
+        }
+        return;
+      }
+
+      message.error(res.message || '抢车执行失败');
+    } catch (err) {
+      const parsed = getBackendErrorMessage(err, '抢车执行失败');
+      const errorData = normalizeGrabCartExecute(parsed.data);
+      if (parsed.status === 409 || normalizeEnumValue(errorData?.code) === 'BLOCKED') {
+        setExecuteBlocked(errorData ?? {
+          code: errorData?.code ?? 'BLOCKED',
+          message: parsed.message,
+          noEmagWriteExecuted: errorData?.noEmagWriteExecuted ?? true,
+        });
+        message.error(errorData?.message || parsed.message || '执行被阻断');
+      } else if (parsed.status === 403) {
+        message.error('当前账号没有抢购物车权限，请联系管理员');
+      } else {
+        message.error(parsed.message);
+      }
+    } finally {
+      setExecuting(false);
+    }
+  };
+
+  const handleExecuteConfirm = () => {
+    if (!canExecuteGrab || confirmedPriceExVat == null) return;
+    Modal.confirm({
+      title: '确认抢车',
+      content: (
+        <div>
+          <p>当前将尝试把售价调整为：{formatMoney(confirmedPriceExVat, currency)}（不含 VAT）</p>
+          <p>最低保护价：{formatMoney(preview?.finalMinPrice, currency)}</p>
+          <p style={{ marginBottom: 0, color: '#64748b' }}>
+            当前后端仍处于安全模式时，不会真实写入 eMAG。
+          </p>
+        </div>
+      ),
+      okText: '确认抢车',
+      cancelText: '取消',
+      onOk: executeGrabCart,
+    });
+  };
+
   const renderPreviewAlert = () => {
     if (errorMessage) {
       return <Alert type="error" showIcon message={errorMessage} style={{ marginBottom: 12 }} />;
     }
     if (!preview) return null;
-    if (preview.canGrab === true) {
-      return <Alert type="success" showIcon message="允许按建议价参与抢购物车报价" style={{ marginBottom: 12 }} />;
+    if (canExecuteGrab) {
+      return (
+        <Alert
+          type="success"
+          showIcon
+          message="允许按建议价参与抢购物车报价"
+          description={`建议抢车价：${formatMoney(preview.suggestedGrabPriceExVat, currency)}（不含 VAT）`}
+          style={{ marginBottom: 12 }}
+        />
+      );
     }
     return (
       <Alert
@@ -277,6 +430,68 @@ export default function PlatformProductGrabCartPreviewModal({
     );
   };
 
+  const renderExecuteBlocked = () => {
+    if (!executeBlocked) return null;
+    const code = executeBlocked.code ?? '-';
+    const noWrite = executeBlocked.noEmagWriteExecuted;
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="执行被阻断"
+        description={
+          <>
+            <div>code：{String(code)}</div>
+            <div>{executeBlocked.message || executeBlocked.errorMessage || '-'}</div>
+            {noWrite != null && <div>noEmagWriteExecuted：{noWrite ? 'true' : 'false'}</div>}
+          </>
+        }
+        style={{ marginTop: 12 }}
+      />
+    );
+  };
+
+  const renderExecuteResult = () => {
+    if (!executeResult) return null;
+    const status = normalizeEnumValue(executeResult.status ?? executeResult.code);
+    const noWrite = executeResult.noEmagWriteExecuted === true || status === 'DRY_RUN_ONLY' || status === 'SKIPPED';
+    let type: 'success' | 'warning' | 'error' | 'info' = 'info';
+    let title = executeResult.message || '抢车请求已返回';
+
+    if (status === 'SUCCESS' && !noWrite) {
+      type = 'success';
+      title = '抢车改价已提交成功';
+    } else if (status === 'DRY_RUN_ONLY' || status === 'SKIPPED' || noWrite) {
+      type = 'warning';
+      title = '安全模式：已模拟执行，未真实改价，未写入 eMAG。';
+    } else if (status === 'FAILED' || status === 'BLOCKED') {
+      type = 'error';
+      title = executeResult.message || executeResult.errorMessage || '抢车执行失败';
+    }
+
+    return (
+      <div style={{ marginTop: 14 }}>
+        <Alert type={type} showIcon message={title} />
+        <Descriptions size="small" column={2} style={{ marginTop: 12 }}>
+          <Descriptions.Item label="status">{status || '-'}</Descriptions.Item>
+          <Descriptions.Item label="code">{executeResult.code ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="message" span={2}>{executeResult.message || executeResult.errorMessage || '-'}</Descriptions.Item>
+          <Descriptions.Item label="noEmagWriteExecuted">
+            {executeResult.noEmagWriteExecuted == null ? '-' : (executeResult.noEmagWriteExecuted ? 'true' : 'false')}
+          </Descriptions.Item>
+          <Descriptions.Item label="logId">{executeResult.logId ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="oldSalePriceExVat">{formatMoney(executeResult.oldSalePriceExVat, currency)}</Descriptions.Item>
+          <Descriptions.Item label="newSalePriceExVat">{formatMoney(executeResult.newSalePriceExVat, currency)}</Descriptions.Item>
+          <Descriptions.Item label="payloadPreview" span={2}>
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12 }}>
+              {formatPayloadPreview(executeResult.payloadPreview)}
+            </pre>
+          </Descriptions.Item>
+        </Descriptions>
+      </div>
+    );
+  };
+
   return (
     <Modal
       title="抢车预览"
@@ -284,7 +499,20 @@ export default function PlatformProductGrabCartPreviewModal({
       onCancel={onCancel}
       width={820}
       destroyOnClose
-      footer={<Button onClick={onCancel}>关闭</Button>}
+      footer={[
+        <Button key="close" onClick={onCancel}>关闭</Button>,
+        ...(canExecuteGrab ? [
+          <Button
+            key="execute"
+            type="primary"
+            loading={executing}
+            disabled={executing}
+            onClick={handleExecuteConfirm}
+          >
+            确认抢车
+          </Button>,
+        ] : []),
+      ]}
     >
       {product ? (
         <>
@@ -340,6 +568,9 @@ export default function PlatformProductGrabCartPreviewModal({
                     style={{ marginTop: 12 }}
                   />
                 )}
+
+                {renderExecuteBlocked()}
+                {renderExecuteResult()}
               </>
             )}
           </Spin>

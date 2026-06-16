@@ -1681,6 +1681,37 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
     setGrabCartTarget(null);
   }, []);
 
+  const handleGrabCartSuccess = useCallback(() => {
+    closeGrabCartPreviewModal();
+    fetchProducts(shopId, appliedKeyword, {
+      page,
+      pageSize,
+      sortBy,
+      sortOrder,
+      mappingStatus,
+      productClass,
+      buyBoxGroup,
+      linkType: linkTypeFilter,
+      stockGroup,
+      operationAction: operationActionFilter,
+    });
+  }, [
+    closeGrabCartPreviewModal,
+    fetchProducts,
+    shopId,
+    appliedKeyword,
+    page,
+    pageSize,
+    sortBy,
+    sortOrder,
+    mappingStatus,
+    productClass,
+    buyBoxGroup,
+    linkTypeFilter,
+    stockGroup,
+    operationActionFilter,
+  ]);
+
   const handlePriceChangeSuccess = useCallback(() => {
     closePriceChangeModal();
     fetchProducts(shopId, appliedKeyword, {
@@ -3039,6 +3070,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         product={grabCartTarget}
         currentShopId={shopId}
         onCancel={closeGrabCartPreviewModal}
+        onSuccess={handleGrabCartSuccess}
       />
 
       {/* 手动贴图地址弹窗 */}
