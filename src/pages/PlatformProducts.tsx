@@ -12,6 +12,7 @@ import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
 import { CreateFbeShipmentModal } from './FbeShipments';
 import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/ProfitBreakdownPopover';
 import PlatformProductPriceChangeModal from '../components/PlatformProductPriceChangeModal';
+import PlatformProductGrabCartPreviewModal from '../components/PlatformProductGrabCartPreviewModal';
 
 const { Text } = Typography;
 
@@ -915,6 +916,11 @@ function getPriceActionDisabledReason(record: StoreProduct): string | null {
   return null;
 }
 
+function getGrabCartPreviewDisabledReason(record: StoreProduct): string | null {
+  const linkType = normalizeEnumValue(record.linkType ?? record.link_type);
+  return linkType === 'RESELL' ? null : '仅普通跟卖可抢购物车';
+}
+
 function renderCompactInfoTag(label: string, style: React.CSSProperties) {
   return (
     <Tag
@@ -1404,6 +1410,9 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   // 手动改价弹窗
   const [priceModalOpen,  setPriceModalOpen]  = useState(false);
   const [priceTarget,     setPriceTarget]     = useState<StoreProduct | null>(null);
+  // 抢购物车只读预览弹窗
+  const [grabCartPreviewOpen, setGrabCartPreviewOpen] = useState(false);
+  const [grabCartTarget,      setGrabCartTarget]      = useState<StoreProduct | null>(null);
   const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
   const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
@@ -1660,6 +1669,16 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const closePriceChangeModal = useCallback(() => {
     setPriceModalOpen(false);
     setPriceTarget(null);
+  }, []);
+
+  const openGrabCartPreviewModal = useCallback((product: StoreProduct) => {
+    setGrabCartTarget(product);
+    setGrabCartPreviewOpen(true);
+  }, []);
+
+  const closeGrabCartPreviewModal = useCallback(() => {
+    setGrabCartPreviewOpen(false);
+    setGrabCartTarget(null);
   }, []);
 
   const handlePriceChangeSuccess = useCallback(() => {
@@ -2337,6 +2356,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         const v = r.price ?? r.sale_price ?? r.salePrice;
         const c = r.currency ?? '';
         const disabledReason = getPriceActionDisabledReason(r);
+        const grabCartDisabledReason = getGrabCartPreviewDisabledReason(r);
         let priceText = '—';
         if (v != null) {
           const num = Number(v).toFixed(2);
@@ -2357,6 +2377,19 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
                 改价
               </Button>
             </Tooltip>
+            {normalizeEnumValue(r.linkType ?? r.link_type) === 'RESELL' && (
+              <Tooltip title={grabCartDisabledReason || undefined}>
+                <Button
+                  size="small"
+                  type="link"
+                  disabled={!!grabCartDisabledReason}
+                  onClick={() => openGrabCartPreviewModal(r)}
+                  style={{ padding: 0, height: 20, fontSize: 12 }}
+                >
+                  抢车预览
+                </Button>
+              </Tooltip>
+            )}
           </div>
         );
       },
@@ -2579,7 +2612,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       fixed: 'right' as const,
       render: (_: unknown, r: StoreProduct) => <OperationAdviceCell record={r} />,
     },
-  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected, openPriceChangeModal]);
+  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected, openPriceChangeModal, openGrabCartPreviewModal]);
 
   /** 纯数字且不足 13 位时提示（EAN 通常为 13 位，含前导零场景由后端统一） */
   const searchEanHint = useMemo(() => {
@@ -2998,6 +3031,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         currentShopId={shopId}
         onCancel={closePriceChangeModal}
         onSuccess={handlePriceChangeSuccess}
+      />
+
+      {/* 抢购物车只读预览弹窗 */}
+      <PlatformProductGrabCartPreviewModal
+        open={grabCartPreviewOpen}
+        product={grabCartTarget}
+        currentShopId={shopId}
+        onCancel={closeGrabCartPreviewModal}
       />
 
       {/* 手动贴图地址弹窗 */}
