@@ -5,6 +5,13 @@ dist-ssr/
 build/
 .vite-cache/
 .vite/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/build/
+frontend/.vite-cache/
+frontend/.vite/
+_legacy_frontend_backup_*/
 
 # ===== 环境变量与密钥（最高优先级保护）=====
 .env
@@ -13,8 +20,15 @@ build/
 .env.production
 .env.staging
 .env.*.local
+frontend/.env
+frontend/.env.local
+frontend/.env.development
+frontend/.env.production
+frontend/.env.staging
+frontend/.env.*.local
 # 仅允许提交"示例"环境变量文件（内容不含真实密钥）
 !.env.example
+!frontend/.env.example
 
 # ===== 日志文件 =====
 logs/
