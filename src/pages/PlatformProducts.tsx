@@ -13,6 +13,7 @@ import { CreateFbeShipmentModal } from './FbeShipments';
 import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/ProfitBreakdownPopover';
 import PlatformProductPriceChangeModal from '../components/PlatformProductPriceChangeModal';
 import PlatformProductGrabCartPreviewModal from '../components/PlatformProductGrabCartPreviewModal';
+import PlatformProductGrabCartBatchModal from '../components/PlatformProductGrabCartBatchModal';
 
 const { Text } = Typography;
 
@@ -1413,6 +1414,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   // 抢购物车只读预览弹窗
   const [grabCartPreviewOpen, setGrabCartPreviewOpen] = useState(false);
   const [grabCartTarget,      setGrabCartTarget]      = useState<StoreProduct | null>(null);
+  // 抢购物车候选池弹窗
+  const [grabCartBatchOpen, setGrabCartBatchOpen] = useState(false);
   const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
   const [pendingUpdateCount, setPendingUpdateCount] = useState(0);
@@ -2780,6 +2783,13 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             ⚙️ 店铺操作 <DownOutlined />
           </Button>
         </Dropdown>
+        <Button
+          icon={<ToolOutlined />}
+          disabled={!shopId}
+          onClick={() => setGrabCartBatchOpen(true)}
+        >
+          抢车候选池
+        </Button>
         <Select<BuyBoxGroupFilter>
           value={buyBoxGroup}
           onChange={(val) => {
@@ -3071,6 +3081,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         currentShopId={shopId}
         onCancel={closeGrabCartPreviewModal}
         onSuccess={handleGrabCartSuccess}
+      />
+
+      {/* 抢购物车候选池批量确认弹窗 */}
+      <PlatformProductGrabCartBatchModal
+        open={grabCartBatchOpen}
+        shopId={shopId}
+        currency={currency}
+        onCancel={() => setGrabCartBatchOpen(false)}
       />
 
       {/* 手动贴图地址弹窗 */}
