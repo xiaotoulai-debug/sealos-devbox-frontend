@@ -3,10 +3,13 @@ import type { Key } from 'react';
 import {
   Alert,
   Button,
+  Collapse,
   Descriptions,
   Empty,
   Input,
   Modal,
+  Row,
+  Col,
   Space,
   Spin,
   Table,
@@ -17,9 +20,85 @@ import {
 import type { ColumnsType } from 'antd/es/table/interface';
 import request from '../lib/request';
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 const MAX_BATCH_ITEMS = 5;
 const DEFAULT_REASON = '批量抢车：运营确认执行';
+
+const BLOCKER_LABEL_MAP: Record<string, string> = {
+  MISSING_FBE_FEE: '缺少 FBE 费用',
+  MISSING_LOGISTICS: '缺少物流/尺寸重量资料',
+  MISSING_COMMISSION: '缺少佣金率',
+  MISSING_PRODUCT_MAPPING: '未映射库存 SKU',
+  CART_PRICE_TAX_MODE_UNKNOWN: '购物车价格税口径未配置',
+  MISSING_COST: '成本资料不完整',
+  ALREADY_WON: '已获得购物车',
+  OUT_OF_STOCK: '库存不足',
+  NOT_RESELL: '非普通跟卖链接',
+};
+
+const BLOCKER_ACTION_HINTS: Record<string, string> = {
+  MISSING_FBE_FEE: '维护这些 SKU 的 FBE 费用，避免成本资料不完整。',
+  MISSING_LOGISTICS: '补充商品尺寸、重量和物流资料，用于计算配送成本。',
+  MISSING_COMMISSION: '同步这些 SKU 的 eMAG 佣金率，用于计算抢车后的利润。',
+  MISSING_PRODUCT_MAPPING: '先完成平台 SKU 与库存 SKU 的映射。',
+  CART_PRICE_TAX_MODE_UNKNOWN: '确认当前店铺购物车价格是否含 VAT，并完成税口径配置。',
+  MISSING_COST: '补齐成本资料',
+  ALREADY_WON: '已获得购物车，无需重复抢车',
+  OUT_OF_STOCK: '补充平台库存后再试',
+  NOT_RESELL: '仅普通跟卖链接可参与抢车',
+};
+
+function normalizeActionDescription(action: string): string {
+  const text = action.trim();
+  if (!text) return '';
+  const lowerText = text.toLowerCase();
+
+  if (text.includes('刷新候选池')) {
+    return '完成资料维护后，重新刷新候选池。';
+  }
+  if (text.includes('Product.fbeFee') || lowerText.includes('fbe')) {
+    return '维护这些 SKU 的 FBE 费用，避免成本资料不完整。';
+  }
+  if (
+    text.includes('StoreProduct.commissionRate')
+    || lowerText.includes('commissionrate')
+    || text.includes('佣金')
+  ) {
+    return '同步这些 SKU 的 eMAG 佣金率，用于计算抢车后的利润。';
+  }
+  if (
+    text.includes('StorePriceStrategyConfig.cartPriceTaxMode')
+    || lowerText.includes('cartpricetaxmode')
+    || lowerText.includes('vat')
+    || text.includes('税口径')
+  ) {
+    return '确认当前店铺购物车价格是否含 VAT，并完成税口径配置。';
+  }
+  if (
+    (text.includes('Product') && (text.includes('长宽高') || text.includes('尺寸') || text.includes('重量')))
+    || text.includes('物流')
+    || lowerText.includes('logistics')
+  ) {
+    return '补充商品尺寸、重量和物流资料，用于计算配送成本。';
+  }
+  if (
+    lowerText.includes('product mapping')
+    || text.includes('库存 SKU')
+    || lowerText.includes('mappedinventorysku')
+  ) {
+    return '先完成平台 SKU 与库存 SKU 的映射。';
+  }
+
+  return text
+    .replaceAll('Product.fbeFee', 'FBE 费用')
+    .replaceAll('StoreProduct.commissionRate', 'eMAG 佣金率')
+    .replaceAll('StorePriceStrategyConfig.cartPriceTaxMode', '购物车价格税口径')
+    .replaceAll('cartPriceTaxMode', '购物车价格税口径')
+    .replaceAll('mappedInventorySku', '库存 SKU')
+    .replaceAll('Product.', '商品')
+    .replaceAll('StoreProduct.', '店铺商品')
+    .replaceAll('StorePriceStrategyConfig.', '店铺价格策略');
+}
 
 interface ApiResponse<T> {
   code: number | string;
@@ -85,17 +164,33 @@ interface ReadinessSummary {
   candidateCount: number | null;
 }
 
+interface ReadinessDisplaySummary {
+  resellCount: number | null;
+  inStockResellCount: number | null;
+  dataReadyCount: number | null;
+  candidateReadyCount: number | null;
+}
+
 interface ReadinessBlocker {
   code: string;
   count: number | null;
   message: string | null;
 }
 
+interface ReadinessNextAction {
+  action: string | null;
+  description: string | null;
+  priority: string | null;
+}
+
 interface GrabCartReadiness {
   autoIntegrationMessage: string | null;
+  displaySummary: ReadinessDisplaySummary;
   summary: ReadinessSummary;
+  topBlockers: ReadinessBlocker[];
   blockers: ReadinessBlocker[];
-  nextActions: string[];
+  nextActions: ReadinessNextAction[];
+  legacyNextActions: string[];
 }
 
 interface PlatformProductGrabCartBatchModalProps {
@@ -165,7 +260,7 @@ function isCandidatesEmpty(payload: unknown, list: GrabCartCandidate[]): boolean
   return list.length === 0;
 }
 
-function normalizeNextActions(raw: unknown): string[] {
+function normalizeLegacyNextActions(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((item) => {
     if (typeof item === 'string') return item.trim();
@@ -177,6 +272,21 @@ function normalizeNextActions(raw: unknown): string[] {
   }).filter(Boolean);
 }
 
+function normalizeNextActions(raw: unknown): ReadinessNextAction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    if (typeof item === 'string') {
+      return { action: item.trim() || null, description: item.trim() || null, priority: null };
+    }
+    const data = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    return {
+      action: pickString(data.action, data.code, data.name),
+      description: pickString(data.description, data.message, data.label, data.text, data.title),
+      priority: pickString(data.priority),
+    };
+  }).filter((item) => item.description || item.action);
+}
+
 function normalizeReadinessBlocker(raw: unknown, index: number): ReadinessBlocker {
   if (typeof raw === 'string') {
     return { code: raw, count: null, message: null };
@@ -186,6 +296,16 @@ function normalizeReadinessBlocker(raw: unknown, index: number): ReadinessBlocke
     code: pickString(data.code, data.blockCode, data.block_code) ?? `BLOCKER_${index + 1}`,
     count: toNumber(data.count ?? data.total ?? data.quantity),
     message: pickString(data.message, data.description, data.reason),
+  };
+}
+
+function normalizeReadinessDisplaySummary(raw: unknown): ReadinessDisplaySummary {
+  const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  return {
+    resellCount: toNumber(data.resellCount ?? data.resell_count),
+    inStockResellCount: toNumber(data.inStockResellCount ?? data.in_stock_resell_count),
+    dataReadyCount: toNumber(data.dataReadyCount ?? data.data_ready_count),
+    candidateReadyCount: toNumber(data.candidateReadyCount ?? data.candidate_ready_count),
   };
 }
 
@@ -212,6 +332,8 @@ function normalizeReadiness(raw: unknown): GrabCartReadiness | null {
     ? autoIntegration as Record<string, unknown>
     : null;
   const blockersRaw = data.blockers ?? data.blockerList ?? data.blocker_list;
+  const topBlockersRaw = data.topBlockers ?? data.top_blockers;
+  const legacyNextActionsRaw = data.legacyNextActions ?? data.legacy_next_actions;
   return {
     autoIntegrationMessage: pickString(
       autoIntegrationObj?.message,
@@ -219,17 +341,68 @@ function normalizeReadiness(raw: unknown): GrabCartReadiness | null {
       data.autoIntegrationMessage,
       data.auto_integration_message,
     ),
+    displaySummary: normalizeReadinessDisplaySummary(data.displaySummary ?? data.display_summary),
     summary: normalizeReadinessSummary(data.summary),
+    topBlockers: Array.isArray(topBlockersRaw)
+      ? topBlockersRaw.map((item, index) => normalizeReadinessBlocker(item, index))
+      : [],
     blockers: Array.isArray(blockersRaw)
       ? blockersRaw.map((item, index) => normalizeReadinessBlocker(item, index))
       : [],
     nextActions: normalizeNextActions(data.nextActions ?? data.next_actions),
+    legacyNextActions: normalizeLegacyNextActions(legacyNextActionsRaw),
   };
 }
 
 function formatReadyFlag(value: boolean | null): string {
   if (value == null) return '-';
   return value ? '是' : '否';
+}
+
+function getBlockerLabel(code: string): string {
+  return BLOCKER_LABEL_MAP[normalizeEnumValue(code)] ?? '其他原因';
+}
+
+function getTopBlockers(blockers: ReadinessBlocker[], limit = 3): ReadinessBlocker[] {
+  if (!Array.isArray(blockers)) return [];
+  return [...blockers]
+    .sort((a, b) => (b.count ?? 0) - (a.count ?? 0))
+    .slice(0, limit);
+}
+
+function getDisplayNextActions(readiness: GrabCartReadiness): string[] {
+  const actions: string[] = [];
+  const pushAction = (text: string) => {
+    const normalized = normalizeActionDescription(text);
+    if (normalized && !actions.includes(normalized)) actions.push(normalized);
+  };
+
+  if (Array.isArray(readiness.nextActions) && readiness.nextActions.length > 0) {
+    readiness.nextActions.forEach((item) => {
+      const text = item.description || item.action;
+      if (text) pushAction(text);
+    });
+  } else if (readiness.legacyNextActions.length > 0) {
+    readiness.legacyNextActions.forEach(pushAction);
+  } else {
+    const sourceBlockers = readiness.topBlockers.length > 0 ? readiness.topBlockers : readiness.blockers;
+    getTopBlockers(sourceBlockers, 5).forEach((blocker) => {
+      const hint = BLOCKER_ACTION_HINTS[normalizeEnumValue(blocker.code)];
+      if (hint) pushAction(hint);
+    });
+    if (actions.length === 0) {
+      pushAction('检查店铺跟卖商品与基础资料配置');
+    }
+  }
+  if (!actions.some((item) => item.includes('刷新'))) {
+    pushAction('刷新候选池');
+  }
+  return actions;
+}
+
+function formatMetricValue(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(Number(value))) return '-';
+  return String(value);
 }
 
 function getCandidateList(payload: unknown): unknown[] {
@@ -572,8 +745,23 @@ export default function PlatformProductGrabCartBatchModal({
 
   const renderReadinessPanel = () => {
     if (!readiness) return null;
-    const { summary } = readiness;
-    const funnelRows = [
+    const { displaySummary, summary } = readiness;
+    const coreMetrics = [
+      { label: '跟卖商品数', value: displaySummary.resellCount ?? summary.resellCount },
+      { label: '有库存跟卖数', value: displaySummary.inStockResellCount ?? summary.resellWithStockCount },
+      { label: '资料完整数', value: displaySummary.dataReadyCount ?? summary.previewOkCount },
+      { label: '可抢车候选数', value: displaySummary.candidateReadyCount ?? summary.candidateCount },
+    ];
+    const topBlockersSource = readiness.topBlockers.length > 0 ? readiness.topBlockers : readiness.blockers;
+    const topBlockers = getTopBlockers(topBlockersSource, 3);
+    const nextActions = getDisplayNextActions(readiness);
+    const displaySummaryRows = [
+      { label: '跟卖商品数', value: displaySummary.resellCount },
+      { label: '有库存跟卖数', value: displaySummary.inStockResellCount },
+      { label: '资料完整数', value: displaySummary.dataReadyCount },
+      { label: '可抢车候选数', value: displaySummary.candidateReadyCount },
+    ];
+    const technicalFunnelRows = [
       { label: '总产品数', value: summary.totalStoreProducts },
       { label: 'RESELL 数', value: summary.resellCount },
       { label: 'RESELL 有库存数', value: summary.resellWithStockCount },
@@ -586,55 +774,168 @@ export default function PlatformProductGrabCartBatchModal({
     ];
 
     return (
-      <div style={{ marginTop: 12 }}>
-        {readiness.autoIntegrationMessage && (
+      <div style={{ marginTop: 4 }}>
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+          {coreMetrics.map((metric) => (
+            <Col key={metric.label} xs={12} sm={12} md={6}>
+              <div
+                style={{
+                  padding: '12px 14px',
+                  borderRadius: 10,
+                  background: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  minHeight: 76,
+                }}
+              >
+                <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                  {metric.label}
+                </Text>
+                <Title level={3} style={{ margin: 0, fontSize: 24, lineHeight: 1.2 }}>
+                  {formatMetricValue(metric.value)}
+                </Title>
+              </div>
+            </Col>
+          ))}
+        </Row>
+
+        {topBlockers.length > 0 ? (
+          <div style={{ marginBottom: 16 }}>
+            <Text strong style={{ display: 'block', marginBottom: 8 }}>主要阻塞原因 TOP 3</Text>
+            <ol style={{ margin: 0, paddingLeft: 20, color: '#334155', fontSize: 14 }}>
+              {topBlockers.map((blocker) => (
+                <li key={blocker.code} style={{ marginBottom: 6 }}>
+                  {getBlockerLabel(blocker.code)}
+                  {blocker.count != null ? `：${blocker.count} 个 SKU` : ''}
+                </li>
+              ))}
+            </ol>
+          </div>
+        ) : (
           <Alert
             type="info"
             showIcon
-            message="自动接入说明"
-            description={readiness.autoIntegrationMessage}
-            style={{ marginBottom: 12 }}
+            message="暂未识别到明确阻塞项"
+            description="可展开下方技术明细查看完整漏斗数据。"
+            style={{ marginBottom: 16 }}
           />
         )}
 
-        <Descriptions size="small" bordered column={3} title="准备漏斗" style={{ marginBottom: 12 }}>
-          {funnelRows.map((row) => (
-            <Descriptions.Item key={row.label} label={row.label}>
-              {row.value ?? '-'}
-            </Descriptions.Item>
-          ))}
-        </Descriptions>
-
-        {readiness.blockers.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
-            <Text strong style={{ display: 'block', marginBottom: 8 }}>阻塞原因</Text>
-            <Space size={[8, 8]} wrap>
-              {readiness.blockers.map((blocker) => (
-                <Tag key={blocker.code} color="error">
-                  {blocker.code}{blocker.count != null ? `：${blocker.count}` : ''}
-                </Tag>
-              ))}
-            </Space>
-            <div style={{ marginTop: 8 }}>
-              {readiness.blockers.filter((b) => b.message).map((blocker) => (
-                <div key={`${blocker.code}-msg`} style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>
-                  {blocker.code}：{blocker.message}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {readiness.nextActions.length > 0 && (
-          <div>
+        {nextActions.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
             <Text strong style={{ display: 'block', marginBottom: 8 }}>下一步建议</Text>
-            <ul style={{ margin: 0, paddingLeft: 20, color: '#475569', fontSize: 13 }}>
-              {readiness.nextActions.map((action) => (
+            <ol style={{ margin: 0, paddingLeft: 20, color: '#475569', fontSize: 13 }}>
+              {nextActions.map((action) => (
                 <li key={action} style={{ marginBottom: 4 }}>{action}</li>
               ))}
-            </ul>
+            </ol>
           </div>
         )}
+
+        <Collapse
+          bordered={false}
+          items={[
+            {
+              key: 'technical-details',
+              label: '查看技术明细',
+              children: (
+                <div>
+                  {readiness.autoIntegrationMessage && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="自动接入说明"
+                      description={readiness.autoIntegrationMessage}
+                      style={{ marginBottom: 12 }}
+                    />
+                  )}
+
+                  <Descriptions size="small" bordered column={2} title="displaySummary 原始值" style={{ marginBottom: 12 }}>
+                    {displaySummaryRows.map((row) => (
+                      <Descriptions.Item key={row.label} label={row.label}>
+                        {row.value ?? '-'}
+                      </Descriptions.Item>
+                    ))}
+                  </Descriptions>
+
+                  <Descriptions size="small" bordered column={3} title="准备漏斗" style={{ marginBottom: 12 }}>
+                    {technicalFunnelRows.map((row) => (
+                      <Descriptions.Item key={row.label} label={row.label}>
+                        {row.value ?? '-'}
+                      </Descriptions.Item>
+                    ))}
+                  </Descriptions>
+
+                  {readiness.topBlockers.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <Text strong style={{ display: 'block', marginBottom: 8 }}>topBlockers</Text>
+                      <Space size={[8, 8]} wrap>
+                        {readiness.topBlockers.map((blocker) => (
+                          <Tag key={`top-${blocker.code}`} color="volcano">
+                            {getBlockerLabel(blocker.code)}（{blocker.code}）
+                            {blocker.count != null ? `：${blocker.count}` : ''}
+                          </Tag>
+                        ))}
+                      </Space>
+                      <div style={{ marginTop: 8 }}>
+                        {readiness.topBlockers.filter((b) => b.message).map((blocker) => (
+                          <div key={`top-${blocker.code}-msg`} style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>
+                            {getBlockerLabel(blocker.code)}（{blocker.code}）：{blocker.message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {readiness.blockers.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <Text strong style={{ display: 'block', marginBottom: 8 }}>blockers</Text>
+                      <Space size={[8, 8]} wrap>
+                        {readiness.blockers.map((blocker) => (
+                          <Tag key={blocker.code} color="error">
+                            {getBlockerLabel(blocker.code)}（{blocker.code}）
+                            {blocker.count != null ? `：${blocker.count}` : ''}
+                          </Tag>
+                        ))}
+                      </Space>
+                      <div style={{ marginTop: 8 }}>
+                        {readiness.blockers.filter((b) => b.message).map((blocker) => (
+                          <div key={`${blocker.code}-msg`} style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>
+                            {getBlockerLabel(blocker.code)}（{blocker.code}）：{blocker.message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {readiness.nextActions.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <Text strong style={{ display: 'block', marginBottom: 8 }}>nextActions</Text>
+                      <ul style={{ margin: 0, paddingLeft: 20, color: '#64748b', fontSize: 12 }}>
+                        {readiness.nextActions.map((action, index) => (
+                          <li key={`${action.action ?? action.description ?? index}`} style={{ marginBottom: 4 }}>
+                            {action.description || action.action || '-'}
+                            {action.priority ? `（${action.priority}）` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {readiness.legacyNextActions.length > 0 && (
+                    <div>
+                      <Text strong style={{ display: 'block', marginBottom: 8 }}>legacyNextActions</Text>
+                      <ul style={{ margin: 0, paddingLeft: 20, color: '#64748b', fontSize: 12 }}>
+                        {readiness.legacyNextActions.map((action) => (
+                          <li key={action} style={{ marginBottom: 4 }}>{action}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ),
+            },
+          ]}
+        />
       </div>
     );
   };
@@ -717,8 +1018,7 @@ export default function PlatformProductGrabCartBatchModal({
               <Alert
                 type="warning"
                 showIcon
-                message="当前店铺暂无可执行抢车候选"
-                description="这不是接口异常。下方展示准备漏斗、阻塞原因与下一步建议，便于排查数据/配置缺口。"
+                message="当前店铺暂无可抢购物车候选"
                 style={{ marginBottom: 12 }}
               />
               <Spin spinning={readinessLoading}>
