@@ -1,4 +1,4 @@
-# Root wrapper Dockerfile for Sealos build from repository root
+# EMAG 跨境电商管理系统 - 前端 Docker 镜像
 FROM node:20-alpine AS builder
 
 WORKDIR /app
@@ -6,16 +6,17 @@ WORKDIR /app
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
 
-COPY frontend/package*.json ./
+COPY package*.json ./
 RUN npm ci
 
-COPY frontend/ ./
+COPY . .
 RUN npm run build
 
+# --- 生产阶段：Nginx 静态托管 ---
 FROM nginx:alpine
 
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
