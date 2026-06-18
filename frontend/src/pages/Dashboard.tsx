@@ -17,6 +17,8 @@ import PlatformOrders from './PlatformOrders';
 import FbeShipments from './FbeShipments';
 import WarehouseList from './WarehouseList';
 import SyncStatusBar from '../components/SyncStatusBar';
+import OrderDailyDashboardPage from './OrderDailyDashboardPage';
+import OperationDailyDashboard from '../components/operationDaily/OperationDailyDashboard';
 import { ALL_MENU_ITEMS, type AppMenuItem } from '../lib/menuConfig';
 import {
   Layout, Menu, Avatar, Dropdown, Tag, Badge,
@@ -135,6 +137,7 @@ const menuLabelMap: Record<string, string> = {
   'inventory-sku':     '产品开发 / 库存 SKU',
   'platform-products': '平台数据 / 平台产品',
   'platform-orders':   '平台数据 / 平台订单',
+  'order-daily-dashboard': '平台数据 / 订单日报 / 运营看板',
   'fbe-shipments':     '平台数据 / FBE发货',
   'sc-planning':       '供应采购 / 采购计划',
   'sc-management':     '供应采购 / 采购管理',
@@ -285,8 +288,6 @@ function getRangeForPreset(preset: TimeRangePreset, customRange: [Dayjs, Dayjs] 
 }
 
 // ── 主组件 ────────────────────────────────────────────────────
-const TAB_KEYS = ['platform-products', 'inventory-sku', 'platform-orders'] as const;
-
 // ── /me 接口响应类型 ───────────────────────────────────────────
 interface MeResponseData {
   id:          number;
@@ -356,20 +357,26 @@ export default function Dashboard() {
   const allowedKeys  = useMemo(() => collectLeafKeys(filteredMenuConfig),  [filteredMenuConfig]);
 
   // ── 安全跳转：若 key 无权访问，回落到仪表盘 ──────────────────
-  const gotoKey = useCallback((key: string) => {
+  const gotoKey = useCallback((key: string, options?: { syncUrl?: boolean; replace?: boolean }) => {
     if (key === 'dashboard' || allowedKeys.has(key)) {
       setActiveKey(key);
+      if (options?.syncUrl !== false) {
+        navigate(key === 'dashboard' ? '/dashboard' : `/dashboard?tab=${encodeURIComponent(key)}`, {
+          replace: options?.replace ?? false,
+        });
+      }
     } else {
       message.warning('您没有访问该模块的权限');
       setActiveKey('dashboard');
+      if (options?.syncUrl !== false) navigate('/dashboard', { replace: true });
     }
-  }, [allowedKeys]);
+  }, [allowedKeys, navigate]);
 
   // 支持 URL ?tab= 直接打开对应页面（如从订单详情新窗口跳转）
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab && TAB_KEYS.includes(tab as (typeof TAB_KEYS)[number])) {
-      gotoKey(tab);
+    if (tab) {
+      gotoKey(tab, { syncUrl: false });
     }
   }, [searchParams, gotoKey]);
 
@@ -398,7 +405,7 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (activeKey === 'dashboard') fetchShops();
+    if (activeKey === 'legacy-company-order-dashboard') fetchShops();
   }, [activeKey, fetchShops]);
 
   // ── 视图切换（图表 / 数据表）────────────────────────────────
@@ -743,8 +750,13 @@ export default function Dashboard() {
         <Content className="bg-gray-50 min-h-screen" style={{ overflowY: 'auto' }}>
           <SyncStatusBar shopId={null} />
           <div style={{ padding: 32 }}>
-          {/* 仪表盘首页 */}
+          {/* 仪表盘首页 - 每日登记 / 任务看板 */}
           {activeKey === 'dashboard' && (
+            <OperationDailyDashboard permissions={adminFlag ? null : permissions} />
+          )}
+
+          {/* 历史全公司订单量大盘：保留代码，不再作为默认首页入口 */}
+          {activeKey === 'legacy-company-order-dashboard' && (
             <>
               {/* 仪表盘定位说明 */}
               <Alert
@@ -1059,6 +1071,9 @@ export default function Dashboard() {
 
           {/* 平台数据 - 平台订单 */}
           {activeKey === 'platform-orders' && <PlatformOrders />}
+
+          {/* 平台数据 - 订单日报 / 运营看板 */}
+          {activeKey === 'order-daily-dashboard' && <OrderDailyDashboardPage />}
 
           {/* 平台数据 - FBE发货 */}
           {activeKey === 'fbe-shipments' && <FbeShipments />}
