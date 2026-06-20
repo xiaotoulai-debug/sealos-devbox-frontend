@@ -14,6 +14,7 @@ import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/Prof
 import PlatformProductPriceChangeModal from '../components/PlatformProductPriceChangeModal';
 import PlatformProductGrabCartPreviewModal from '../components/PlatformProductGrabCartPreviewModal';
 import PlatformProductGrabCartBatchModal from '../components/PlatformProductGrabCartBatchModal';
+import PlatformProductPriceActionLogModal from '../components/PlatformProductPriceActionLogModal';
 
 const { Text } = Typography;
 
@@ -131,6 +132,17 @@ interface PriceActionEligibility {
   canChangePrice?: boolean;
   code?: string | null;
   message?: string | null;
+}
+
+interface GrabCartEligibility {
+  canGrab?: boolean | null;
+  can_grab?: boolean | null;
+  code?: string | null;
+  message?: string | null;
+  blockCode?: string | null;
+  block_code?: string | null;
+  blockMessage?: string | null;
+  block_message?: string | null;
 }
 
 const OPERATION_ADVICE_DISPLAY_LIMIT = 3;
@@ -570,6 +582,13 @@ interface StoreProduct {
   buy_box_action_tips?: string[] | string | null;
   buyBoxMeta?: unknown;
   buy_box_meta?: unknown;
+  grabCartEligibility?: GrabCartEligibility | null;
+  grab_cart_eligibility?: GrabCartEligibility | null;
+  canGrabCart?: boolean | null;
+  can_grab_cart?: boolean | null;
+  isSaleable?: boolean | null;
+  is_saleable?: boolean | null;
+  saleable?: boolean | null;
   purchaseSuggestion?:   PurchaseSuggestionData | null;
   purchase_suggestion?:  PurchaseSuggestionData | null;
   operationAdvice?:      OperationAdvice | null;
@@ -917,9 +936,42 @@ function getPriceActionDisabledReason(record: StoreProduct): string | null {
   return null;
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function getGrabCartPreviewDisabledReason(record: StoreProduct): string | null {
   const linkType = normalizeEnumValue(record.linkType ?? record.link_type);
-  return linkType === 'RESELL' ? null : '仅普通跟卖可抢购物车';
+  if (linkType === 'SELF_BUILT') return '自建链接不参与手动抢购物车';
+  if (linkType === 'OWN_BRAND_RESELL') return '自有品牌跟卖不参与手动抢购物车';
+  if (linkType !== 'RESELL') return '仅普通跟卖可抢购物车';
+
+  const stock = toFiniteNumber(record.platformStock ?? record.platform_stock ?? record.stock);
+  if (stock != null && stock <= 0) return '库存为 0，不可抢购物车';
+
+  const buyBoxStatus = normalizeEnumValue(record.buyBoxStatus ?? record.buy_box_status);
+  if (buyBoxStatus === 'WON') return '已赢得购物车，无需重复抢车';
+
+  const saleable = record.isSaleable ?? record.is_saleable ?? record.saleable;
+  if (saleable === false) return '当前商品不可售';
+  const status = normalizeEnumValue(record.status);
+  if (['INACTIVE', 'DISABLED', 'NOT_SALEABLE', 'REJECTED'].includes(status)) return '当前商品不可售';
+
+  const eligibility = record.grabCartEligibility ?? record.grab_cart_eligibility ?? null;
+  const canGrab = eligibility?.canGrab ?? eligibility?.can_grab ?? record.canGrabCart ?? record.can_grab_cart;
+  if (canGrab === false) {
+    return eligibility?.message
+      ?? eligibility?.blockMessage
+      ?? eligibility?.block_message
+      ?? eligibility?.code
+      ?? eligibility?.blockCode
+      ?? eligibility?.block_code
+      ?? '未满足后端抢车候选条件';
+  }
+
+  return null;
 }
 
 function renderCompactInfoTag(label: string, style: React.CSSProperties) {
@@ -1414,6 +1466,9 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   // 抢购物车只读预览弹窗
   const [grabCartPreviewOpen, setGrabCartPreviewOpen] = useState(false);
   const [grabCartTarget,      setGrabCartTarget]      = useState<StoreProduct | null>(null);
+  // 调价日志弹窗
+  const [priceActionLogOpen, setPriceActionLogOpen] = useState(false);
+  const [priceActionLogTarget, setPriceActionLogTarget] = useState<StoreProduct | null>(null);
   // 抢购物车候选池弹窗
   const [grabCartBatchOpen, setGrabCartBatchOpen] = useState(false);
   const hasSelected = selectedRowKeys.length > 0;
@@ -1682,6 +1737,16 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   const closeGrabCartPreviewModal = useCallback(() => {
     setGrabCartPreviewOpen(false);
     setGrabCartTarget(null);
+  }, []);
+
+  const openPriceActionLogModal = useCallback((product: StoreProduct) => {
+    setPriceActionLogTarget(product);
+    setPriceActionLogOpen(true);
+  }, []);
+
+  const closePriceActionLogModal = useCallback(() => {
+    setPriceActionLogOpen(false);
+    setPriceActionLogTarget(null);
   }, []);
 
   const handleGrabCartSuccess = useCallback(() => {
@@ -2411,19 +2476,25 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
                 改价
               </Button>
             </Tooltip>
-            {normalizeEnumValue(r.linkType ?? r.link_type) === 'RESELL' && (
-              <Tooltip title={grabCartDisabledReason || undefined}>
-                <Button
-                  size="small"
-                  type="link"
-                  disabled={!!grabCartDisabledReason}
-                  onClick={() => openGrabCartPreviewModal(r)}
-                  style={{ padding: 0, height: 20, fontSize: 12 }}
-                >
-                  抢车预览
-                </Button>
-              </Tooltip>
-            )}
+            <Tooltip title={grabCartDisabledReason || undefined}>
+              <Button
+                size="small"
+                type="link"
+                disabled={!!grabCartDisabledReason}
+                onClick={() => openGrabCartPreviewModal(r)}
+                style={{ padding: 0, height: 20, fontSize: 12 }}
+              >
+                手动抢车
+              </Button>
+            </Tooltip>
+            <Button
+              size="small"
+              type="link"
+              onClick={() => openPriceActionLogModal(r)}
+              style={{ padding: 0, height: 20, fontSize: 12 }}
+            >
+              调价日志
+            </Button>
           </div>
         );
       },
@@ -2646,7 +2717,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
       fixed: 'right' as const,
       render: (_: unknown, r: StoreProduct) => <OperationAdviceCell record={r} />,
     },
-  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected, openPriceChangeModal, openGrabCartPreviewModal]);
+  ], [inventoryMap, currency, shopId, appliedKeyword, fetchProducts, openMapModal, openPasteModal, sortBy, sortOrder, handleProfitCorrected, openPriceChangeModal, openGrabCartPreviewModal, openPriceActionLogModal]);
 
   /** 纯数字且不足 13 位时提示（EAN 通常为 13 位，含前导零场景由后端统一） */
   const searchEanHint = useMemo(() => {
@@ -2783,13 +2854,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             ⚙️ 店铺操作 <DownOutlined />
           </Button>
         </Dropdown>
-        <Button
-          icon={<ToolOutlined />}
-          disabled={!shopId}
-          onClick={() => setGrabCartBatchOpen(true)}
-        >
-          抢车候选池
-        </Button>
+        <Tooltip title="V1 仅开放单品手动抢车，暂不展示批量真实抢车入口">
+          <Button
+            icon={<ToolOutlined />}
+            disabled
+            onClick={() => setGrabCartBatchOpen(true)}
+          >
+            抢车候选池
+          </Button>
+        </Tooltip>
         <Select<BuyBoxGroupFilter>
           value={buyBoxGroup}
           onChange={(val) => {
@@ -3081,6 +3154,14 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         currentShopId={shopId}
         onCancel={closeGrabCartPreviewModal}
         onSuccess={handleGrabCartSuccess}
+      />
+
+      {/* 调价日志弹窗 */}
+      <PlatformProductPriceActionLogModal
+        open={priceActionLogOpen}
+        product={priceActionLogTarget}
+        currentShopId={shopId}
+        onCancel={closePriceActionLogModal}
       />
 
       {/* 抢购物车候选池批量确认弹窗 */}

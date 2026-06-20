@@ -73,6 +73,9 @@ interface GrabCartExecuteData {
   logId?: number | string | null;
   oldSalePriceExVat?: number | null;
   newSalePriceExVat?: number | null;
+  readBackStatus?: string | null;
+  readBackPrice?: number | null;
+  readBackWarning?: string | null;
   payloadPreview?: Record<string, unknown> | null;
 }
 
@@ -228,6 +231,9 @@ function normalizeGrabCartExecute(raw: unknown): GrabCartExecuteData | null {
     logId: (data.logId ?? data.log_id) as number | string | null | undefined,
     oldSalePriceExVat: toNumber(data.oldSalePriceExVat ?? data.old_sale_price_ex_vat),
     newSalePriceExVat: toNumber(data.newSalePriceExVat ?? data.new_sale_price_ex_vat),
+    readBackStatus: pickString(data.readBackStatus, data.read_back_status),
+    readBackPrice: toNumber(data.readBackPrice ?? data.read_back_price),
+    readBackWarning: pickString(data.readBackWarning, data.read_back_warning),
     payloadPreview: (data.payloadPreview ?? data.payload_preview) as Record<string, unknown> | null | undefined,
   };
 }
@@ -276,6 +282,10 @@ export default function PlatformProductGrabCartPreviewModal({
   const blockMessage = preview?.message ?? null;
   const canExecuteGrab = isGrabExecuteAllowed(preview);
   const confirmedPriceExVat = preview?.suggestedGrabPriceExVat ?? null;
+  const fbeEstimateHint = warnings.some((item) => {
+    const text = item.toLowerCase();
+    return text.includes('fbe') || item.includes('估算');
+  }) || normalizeEnumValue(preview?.costStatus) === 'ESTIMATED';
 
   useEffect(() => {
     if (!open) return;
@@ -359,6 +369,8 @@ export default function PlatformProductGrabCartPreviewModal({
           message.warning('安全模式：已模拟执行，未真实改价，未写入 eMAG');
         } else if (status === 'FAILED') {
           message.error(data.message || data.errorMessage || '抢车执行失败');
+        } else if (status === 'PENDING_VERIFY') {
+          message.warning('已提交 eMAG，等待平台回读确认');
         }
         return;
       }
@@ -459,11 +471,16 @@ export default function PlatformProductGrabCartPreviewModal({
     let title = executeResult.message || '抢车请求已返回';
 
     if (status === 'SUCCESS' && !noWrite) {
-      type = 'success';
-      title = '抢车改价已提交成功';
+      type = executeResult.readBackStatus === 'UNCONFIRMED' ? 'warning' : 'success';
+      title = executeResult.readBackStatus === 'UNCONFIRMED'
+        ? '已提交 eMAG，等待平台回读确认'
+        : '抢车改价已确认';
     } else if (status === 'DRY_RUN_ONLY' || status === 'SKIPPED' || noWrite) {
       type = 'warning';
       title = '安全模式：已模拟执行，未真实改价，未写入 eMAG。';
+    } else if (status === 'PENDING_VERIFY') {
+      type = 'warning';
+      title = '已提交 eMAG，等待平台回读确认';
     } else if (status === 'FAILED' || status === 'BLOCKED') {
       type = 'error';
       title = executeResult.message || executeResult.errorMessage || '抢车执行失败';
@@ -482,19 +499,24 @@ export default function PlatformProductGrabCartPreviewModal({
           <Descriptions.Item label="logId">{executeResult.logId ?? '-'}</Descriptions.Item>
           <Descriptions.Item label="oldSalePriceExVat">{formatMoney(executeResult.oldSalePriceExVat, currency)}</Descriptions.Item>
           <Descriptions.Item label="newSalePriceExVat">{formatMoney(executeResult.newSalePriceExVat, currency)}</Descriptions.Item>
+          <Descriptions.Item label="readBackStatus">{executeResult.readBackStatus ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="readBackPrice">{formatMoney(executeResult.readBackPrice, currency)}</Descriptions.Item>
           <Descriptions.Item label="payloadPreview" span={2}>
             <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12 }}>
               {formatPayloadPreview(executeResult.payloadPreview)}
             </pre>
           </Descriptions.Item>
         </Descriptions>
+        {executeResult.readBackWarning && (
+          <Alert type="warning" showIcon message={executeResult.readBackWarning} style={{ marginTop: 8 }} />
+        )}
       </div>
     );
   };
 
   return (
     <Modal
-      title="抢车预览"
+      title="手动抢购物车"
       open={open}
       onCancel={onCancel}
       width={820}
@@ -542,7 +564,7 @@ export default function PlatformProductGrabCartPreviewModal({
                   <Descriptions.Item label="购物车价（不含 VAT）">{formatMoney(preview.cartPriceExVat, currency)}</Descriptions.Item>
                   <Descriptions.Item label="建议抢车价（不含 VAT）">{formatMoney(preview.suggestedGrabPriceExVat, currency)}</Descriptions.Item>
                   <Descriptions.Item label="当前我方售价（不含 VAT）">{formatMoney(preview.currentSalePriceExVat, currency)}</Descriptions.Item>
-                  <Descriptions.Item label="最终最低保护价">{formatMoney(preview.finalMinPrice, currency)}</Descriptions.Item>
+                  <Descriptions.Item label="最低保护价">{formatMoney(preview.finalMinPrice, currency)}</Descriptions.Item>
                   <Descriptions.Item label="抢车步进">{formatMoney(preview.grabStep, currency)}</Descriptions.Item>
                   <Descriptions.Item label="改价后预估毛利">{formatMoney(preview.estimatedProfitAfter, currency)}</Descriptions.Item>
                   <Descriptions.Item label="改价后毛利率">{formatPct(preview.profitMarginPctAfter)}</Descriptions.Item>
@@ -555,6 +577,15 @@ export default function PlatformProductGrabCartPreviewModal({
                     showIcon
                     message="风险提示"
                     description={warnings.map((w) => <div key={w}>{w}</div>)}
+                    style={{ marginTop: 12 }}
+                  />
+                )}
+                {fbeEstimateHint && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="FBE 费用存在估算或成本资料非完整状态"
+                    description="抢车价格会影响毛利，请以最终成本与平台回读结果为准。"
                     style={{ marginTop: 12 }}
                   />
                 )}

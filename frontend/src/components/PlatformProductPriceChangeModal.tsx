@@ -225,6 +225,10 @@ export default function PlatformProductPriceChangeModal({
   const previewNewPrice = toNumber(preview?.newSalePriceExVat);
   const belowFinalMin = previewNewPrice != null && finalMin != null && previewNewPrice < finalMin;
   const costStatus = normalizeEnumValue(preview?.costStatus);
+  const fbeEstimateHint = [...costWarnings, ...warnings].some((item) => {
+    const text = item.toLowerCase();
+    return text.includes('fbe') || item.includes('估算');
+  }) || costStatus === 'ESTIMATED';
 
   useEffect(() => {
     if (!open) return;
@@ -377,14 +381,14 @@ export default function PlatformProductPriceChangeModal({
     if (status === 'SUCCESS' && !noWrite) {
       type = executeResult.readBackStatus === 'UNCONFIRMED' ? 'warning' : 'success';
       title = executeResult.readBackStatus === 'UNCONFIRMED'
-        ? '改价请求成功，但 eMAG API 对账暂未确认，请稍后刷新或人工确认'
-        : '改价已提交成功';
+        ? '已提交 eMAG，等待平台回读确认'
+        : '改价已确认';
     } else if (status === 'DRY_RUN_ONLY' || status === 'SKIPPED' || noWrite) {
       type = 'warning';
       title = '后端当前处于安全模式，未发送 eMAG 写请求，未真实改价';
     } else if (status === 'PENDING_VERIFY') {
       type = 'warning';
-      title = 'eMAG 状态不明，请人工核查';
+      title = '已提交 eMAG，等待平台回读确认';
     } else if (status === 'FAILED') {
       type = 'error';
       title = executeResult.message || executeResult.errorMessage || '改价失败';
@@ -505,7 +509,7 @@ export default function PlatformProductPriceChangeModal({
                 <Descriptions.Item label="新售价（不含 VAT）">{formatMoney(preview.newSalePriceExVat, currency)}</Descriptions.Item>
                 <Descriptions.Item label="新售价（含 VAT）">{formatMoney(preview.newSalePriceIncVat, currency)}</Descriptions.Item>
                 <Descriptions.Item label="VAT">{formatPct(preview.vatRate)}</Descriptions.Item>
-                <Descriptions.Item label="最终最低保护价">{formatMoney(preview.finalMinPrice, currency)}</Descriptions.Item>
+                <Descriptions.Item label="最低保护价">{formatMoney(preview.finalMinPrice, currency)}</Descriptions.Item>
                 <Descriptions.Item label="硬底价">{formatMoney(preview.hardFloorPrice, currency)}</Descriptions.Item>
                 <Descriptions.Item label="建议最低价">{formatMoney(preview.suggestedMinPrice, currency)}</Descriptions.Item>
                 <Descriptions.Item label="人工最低价">{formatMoney(preview.manualMinPrice, currency)}</Descriptions.Item>
@@ -523,15 +527,20 @@ export default function PlatformProductPriceChangeModal({
                   style={{ marginTop: 12 }}
                 />
               )}
+              {fbeEstimateHint && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="FBE 费用存在估算或成本资料非完整状态"
+                  description="请以最终回读与财务成本为准，必要时先维护 FBE/履约成本后再执行真实改价。"
+                  style={{ marginTop: 12 }}
+                />
+              )}
               {payload && (
                 <details style={{ marginTop: 12 }}>
-                  <summary style={{ cursor: 'pointer', color: '#2563eb' }}>payloadPreview 简要信息</summary>
+                  <summary style={{ cursor: 'pointer', color: '#2563eb' }}>payloadPreview 折叠区</summary>
                   <pre style={{ marginTop: 8, padding: 10, background: '#0f172a', color: '#e2e8f0', borderRadius: 6, overflowX: 'auto', fontSize: 12 }}>
-                    {JSON.stringify({
-                      id: payload.id,
-                      sale_price: payload.sale_price,
-                      vat_id: payload.vat_id,
-                    }, null, 2)}
+                    {JSON.stringify(payload, null, 2)}
                   </pre>
                 </details>
               )}
