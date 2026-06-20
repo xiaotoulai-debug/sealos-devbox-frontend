@@ -5,7 +5,7 @@ import request from '../lib/request';
 
 const { Text } = Typography;
 
-type PriceActionMode = 'MANUAL_PRICE_CHANGE' | 'MANUAL_GRAB_CART' | string;
+type PriceActionMode = 'MANUAL_PRICE_CHANGE' | 'GRAB_CART_MANUAL' | 'MANUAL_GRAB_CART' | string;
 type PriceActionStatus = 'SUCCESS' | 'PENDING_VERIFY' | 'FAILED' | 'SKIPPED' | 'DRY_RUN_ONLY' | string;
 
 interface StoreProductPriceActionLogTarget {
@@ -151,7 +151,7 @@ function formatDateTime(value: string | null | undefined): string {
 function normalizeMode(value: unknown): string {
   const mode = normalizeEnumValue(value);
   if (mode === 'MANUAL_PRICE_CHANGE' || mode === 'PRICE_CHANGE') return '手动改价';
-  if (mode === 'MANUAL_GRAB_CART' || mode === 'GRAB_CART') return '手动抢车';
+  if (mode === 'GRAB_CART_MANUAL' || mode === 'MANUAL_GRAB_CART' || mode === 'GRAB_CART') return '手动抢车';
   return mode || '-';
 }
 
@@ -194,12 +194,40 @@ function getLogListPayload(payload: unknown): RawPriceActionLog[] {
   return Array.isArray(candidate) ? candidate as RawPriceActionLog[] : [];
 }
 
-function getBackendErrorMessage(err: unknown, fallback: string): { status?: number; message: string } {
-  const e = err as { response?: { status?: number; data?: { message?: string; errorMessage?: string } }; message?: string };
+function getBackendErrorMessage(err: unknown, fallback: string): { status?: number; message: string; code?: number | string } {
+  const e = err as {
+    response?: {
+      status?: number;
+      data?: { code?: number | string; message?: string; errorMessage?: string; status?: string };
+    };
+    message?: string;
+  };
   return {
     status: e.response?.status,
+    code: e.response?.data?.code,
     message: e.response?.data?.message || e.response?.data?.errorMessage || e.message || fallback,
   };
+}
+
+function extractResponseStatus(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const obj = payload as Record<string, unknown>;
+  return normalizeEnumValue(obj.status ?? obj.readBackStatus ?? obj.read_back_status);
+}
+
+function isPendingVerifyResponse(httpStatus: number | undefined, res: ApiResponse<unknown>): boolean {
+  const responseCode = Number(res.code);
+  const responseStatus = extractResponseStatus(res.data);
+  return httpStatus === 202
+    || responseCode === 202
+    || responseStatus === 'PENDING_VERIFY'
+    || normalizeEnumValue(String(res.message ?? '')).includes('PENDING_VERIFY');
+}
+
+function isSuccessReconcileResponse(res: ApiResponse<unknown>): boolean {
+  const responseCode = Number(res.code);
+  const responseStatus = extractResponseStatus(res.data);
+  return responseCode === 200 || responseStatus === 'SUCCESS';
 }
 
 export default function PlatformProductPriceActionLogModal({
@@ -227,8 +255,14 @@ export default function PlatformProductPriceActionLogModal({
     setErrorMessage(null);
     try {
       const { data: res } = await request.get<ApiResponse<unknown>>(
-        `/store-products/${storeProductId}/price-action-logs`,
-        { params: { shopId: resolvedShopId ?? undefined } },
+        `/store-products/${storeProductId}/price/logs`,
+        {
+          params: {
+            shopId: resolvedShopId ?? undefined,
+            page: 1,
+            pageSize: 20,
+          },
+        },
       );
       if (Number(res.code) === 200) {
         setLogs(getLogListPayload(res.data).map((item, index) => normalizeLog(item, index, currency)));
@@ -258,19 +292,27 @@ export default function PlatformProductPriceActionLogModal({
     const id = String(record.id);
     setReconcileLoadingId(id);
     try {
-      const { data: res } = await request.post<ApiResponse<unknown>>(
-        `/store-products/price-action-logs/${encodeURIComponent(id)}/reconcile`,
-        { shopId: resolvedShopId ?? undefined },
+      const { data: res, status: httpStatus } = await request.post<ApiResponse<unknown>>(
+        `/store-products/price/logs/${encodeURIComponent(id)}/reconcile`,
       );
-      if (Number(res.code) === 200) {
-        message.success('已触发重新核验');
+      if (isPendingVerifyResponse(httpStatus, res)) {
+        message.warning('平台尚未确认，未重复发送改价请求');
+        await loadLogs();
+      } else if (isSuccessReconcileResponse(res)) {
+        message.success('平台已确认改价');
         await loadLogs();
       } else {
         message.warning(res.message || '后端暂未完成重新核验');
       }
     } catch (err) {
       const parsed = getBackendErrorMessage(err, '重新核验失败');
-      message.warning(parsed.status === 404 ? '后端暂未提供重新核验接口' : parsed.message);
+      const errData = (err as { response?: { data?: ApiResponse<unknown> } }).response?.data;
+      if (parsed.status === 202 || Number(parsed.code) === 202 || (errData && isPendingVerifyResponse(parsed.status, errData))) {
+        message.warning('平台尚未确认，未重复发送改价请求');
+        await loadLogs();
+      } else {
+        message.warning(parsed.status === 404 ? '后端暂未提供重新核验接口' : parsed.message);
+      }
     } finally {
       setReconcileLoadingId(null);
     }
