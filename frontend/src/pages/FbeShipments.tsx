@@ -15,6 +15,7 @@ import {
 } from '@ant-design/icons';
 import request from '../lib/request';
 import { isSuperAdminUser } from '../lib/auth';
+import FbeFeeManagement from '../components/FbeFeeManagement';
 
 const { Text } = Typography;
 const { confirm } = Modal;
@@ -434,6 +435,7 @@ export default function FbeShipments() {
   const [keyword, setKeyword]     = useState('');
   const [search, setSearch]       = useState('');
   const [activeTab, setActiveTab] = useState<FbeStatus | 'ALL'>('ALL');
+  const [pageMainTab, setPageMainTab] = useState<'shipments' | 'fees'>('shipments');
 
   // 明细抽屉
   const [drawerOpen,    setDrawerOpen]    = useState(false);
@@ -986,53 +988,70 @@ export default function FbeShipments() {
             <InboxOutlined style={{ color: '#2563eb' }} /> FBE发货
           </h2>
           <p style={{ margin: '4px 0 0', color: '#94a3b8', fontSize: 13 }}>
-            管理 4 阶段发货流程：待处理 → 配货中 → 已发货 → 已入仓
+            {pageMainTab === 'shipments'
+              ? '管理 4 阶段发货流程：待处理 → 配货中 → 已发货 → 已入仓'
+              : '维护真实 FBE 费用，影响成本核算与抢车候选判定'}
           </p>
         </div>
-        <Space>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setManualCreateOpen(true)}>
-            新建发货单
-          </Button>
-          <Input.Search
-            placeholder="搜索发货单号 / 备注"
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onSearch={(v) => { setSearch(v); setPage(1); }}
-            allowClear
-            style={{ width: 220 }}
-          />
-          <Button icon={<ReloadOutlined />} onClick={refresh}>刷新</Button>
-        </Space>
+        {pageMainTab === 'shipments' && (
+          <Space>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setManualCreateOpen(true)}>
+              新建发货单
+            </Button>
+            <Input.Search
+              placeholder="搜索发货单号 / 备注"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              onSearch={(v) => { setSearch(v); setPage(1); }}
+              allowClear
+              style={{ width: 220 }}
+            />
+            <Button icon={<ReloadOutlined />} onClick={refresh}>刷新</Button>
+          </Space>
+        )}
       </div>
 
-      {/* Tabs 看板 */}
-      <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0' }}>
-        <Tabs
-          activeKey={activeTab}
-          onChange={handleTabChange}
-          items={tabItems}
-          style={{ padding: '0 16px' }}
-          tabBarStyle={{ marginBottom: 0 }}
-        />
-        <div style={{ padding: '0 0 8px' }}>
-          <Table
-            rowKey="id"
-            loading={loading}
-            dataSource={allList}
-            columns={columns}
-            scroll={{ x: 'max-content', y: 'calc(100vh - 310px)' }}
-            pagination={{
-              current: page,
-              pageSize,
-              total,
-              showSizeChanger: true,
-              showTotal: (t) => `共 ${t} 条`,
-              onChange: (p, ps) => { setPage(p); setPageSize(ps); },
-            }}
-            locale={{ emptyText: <Empty description="该状态下暂无发货单" style={{ padding: 48 }} /> }}
+      <Tabs
+        activeKey={pageMainTab}
+        onChange={(key) => setPageMainTab(key as 'shipments' | 'fees')}
+        style={{ marginBottom: 16 }}
+        items={[
+          { key: 'shipments', label: '发货管理' },
+          { key: 'fees', label: 'FBE费用管理' },
+        ]}
+      />
+
+      {pageMainTab === 'fees' ? (
+        <FbeFeeManagement />
+      ) : (
+        <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #f0f0f0' }}>
+          <Tabs
+            activeKey={activeTab}
+            onChange={handleTabChange}
+            items={tabItems}
+            style={{ padding: '0 16px' }}
+            tabBarStyle={{ marginBottom: 0 }}
           />
+          <div style={{ padding: '0 0 8px' }}>
+            <Table
+              rowKey="id"
+              loading={loading}
+              dataSource={allList}
+              columns={columns}
+              scroll={{ x: 'max-content', y: 'calc(100vh - 360px)' }}
+              pagination={{
+                current: page,
+                pageSize,
+                total,
+                showSizeChanger: true,
+                showTotal: (t) => `共 ${t} 条`,
+                onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+              }}
+              locale={{ emptyText: <Empty description="该状态下暂无发货单" style={{ padding: 48 }} /> }}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* 明细抽屉 */}
       <DetailDrawer

@@ -15,6 +15,7 @@ import PlatformProductPriceChangeModal from '../components/PlatformProductPriceC
 import PlatformProductGrabCartPreviewModal from '../components/PlatformProductGrabCartPreviewModal';
 import PlatformProductGrabCartBatchModal from '../components/PlatformProductGrabCartBatchModal';
 import PlatformProductPriceActionLogModal from '../components/PlatformProductPriceActionLogModal';
+import GrabCartCandidateDrawer from '../components/GrabCartCandidateDrawer';
 
 const { Text } = Typography;
 
@@ -1469,7 +1470,8 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
   // 调价日志弹窗
   const [priceActionLogOpen, setPriceActionLogOpen] = useState(false);
   const [priceActionLogTarget, setPriceActionLogTarget] = useState<StoreProduct | null>(null);
-  // 抢购物车候选池弹窗
+  // 抢购物车候选池（只读 Drawer）
+  const [grabCartDrawerOpen, setGrabCartDrawerOpen] = useState(false);
   const [grabCartBatchOpen, setGrabCartBatchOpen] = useState(false);
   const hasSelected = selectedRowKeys.length > 0;
   // 待刷新状态（后台有新数据时仅累加，不强制刷新，由用户手动触发）
@@ -2854,13 +2856,13 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             ⚙️ 店铺操作 <DownOutlined />
           </Button>
         </Dropdown>
-        <Tooltip title="V1 仅开放单品手动抢车，暂不展示批量真实抢车入口">
+        <Tooltip title={shopId ? '查看候选与阻断原因，真实抢车未开放' : '请先选择店铺'}>
           <Button
             icon={<ToolOutlined />}
-            disabled
-            onClick={() => setGrabCartBatchOpen(true)}
+            disabled={!shopId}
+            onClick={() => setGrabCartDrawerOpen(true)}
           >
-            抢车候选池
+            抢车候选池（只读）
           </Button>
         </Tooltip>
         <Select<BuyBoxGroupFilter>
@@ -3164,7 +3166,15 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         onCancel={closePriceActionLogModal}
       />
 
-      {/* 抢购物车候选池批量确认弹窗 */}
+      {/* 抢购物车候选池（只读） */}
+      <GrabCartCandidateDrawer
+        open={grabCartDrawerOpen}
+        shopId={shopId}
+        currency={currency}
+        onCancel={() => setGrabCartDrawerOpen(false)}
+      />
+
+      {/* 抢购物车候选池批量确认弹窗（保留组件，当前无入口） */}
       <PlatformProductGrabCartBatchModal
         open={grabCartBatchOpen}
         shopId={shopId}
