@@ -19,6 +19,7 @@ interface ApiResponse<T> {
 interface ImportRow {
   scope: string;
   shopId: number | null;
+  storeProductId: number | null;
   sku: string;
   pnk: string;
   feeCny: number | null;
@@ -28,23 +29,25 @@ interface ImportRow {
 interface PreviewRow {
   key: string;
   scope: string;
+  scopeLabel: string;
   shopId: number | null;
   sku: string;
   pnk: string;
   oldFeeCny: number | null;
   newFeeCny: number | null;
-  matchStatus: string;
   affectedStoreProductCount: number | null;
   message: string;
   status: string;
 }
 
 interface PreviewSummary {
-  success: number;
-  unchanged: number;
-  errors: number;
-  ambiguous: number;
-  unmapped: number;
+  total: number | null;
+  planned: number | null;
+  updated: number | null;
+  unchanged: number | null;
+  failed: number | null;
+  affectedStoreProductCount: number | null;
+  profitRecalculatedCount: number | null;
 }
 
 interface FbeFeeBatchImportModalProps {
@@ -67,42 +70,64 @@ function pickString(...values: unknown[]): string {
   return '';
 }
 
+function normalizeEnum(value: unknown): string {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function normalizeScopeValue(scope: string): string {
+  const s = normalizeEnum(scope);
+  if (s === 'PRODUCT_DEFAULT' || s === 'SKU_DEFAULT' || s === 'SKU') return 'PRODUCT_DEFAULT';
+  if (s === 'STORE_PRODUCT_OVERRIDE' || s === 'SHOP_OVERRIDE' || s === 'SHOP') return 'STORE_PRODUCT_OVERRIDE';
+  return s;
+}
+
+function getFeeScopeLabel(scope: string): string {
+  const s = normalizeEnum(scope);
+  if (s === 'STORE_PRODUCT_OVERRIDE') return '店铺覆盖';
+  if (s === 'PRODUCT_DEFAULT') return 'SKU默认';
+  if (s === 'DEFAULT_FALLBACK') return '7 RMB估算';
+  return scope || '-';
+}
+
 function getListPayload(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (!payload || typeof payload !== 'object') return [];
   const obj = payload as Record<string, unknown>;
-  return Array.isArray(obj.list) ? obj.list
-    : Array.isArray(obj.items) ? obj.items
-      : Array.isArray(obj.rows) ? obj.rows
+  return Array.isArray(obj.items) ? obj.items
+    : Array.isArray(obj.rows) ? obj.rows
+      : Array.isArray(obj.list) ? obj.list
         : Array.isArray(obj.results) ? obj.results
           : [];
 }
 
 function normalizePreviewRow(raw: unknown, index: number): PreviewRow {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const scope = pickString(data.scope);
   return {
-    key: String(data.id ?? data.sku ?? data.pnk ?? `row-${index}`),
-    scope: pickString(data.scope),
+    key: String(data.id ?? data.sku ?? data.pnk ?? data.storeProductId ?? `row-${index}`),
+    scope,
+    scopeLabel: getFeeScopeLabel(scope),
     shopId: toNumber(data.shopId ?? data.shop_id),
     sku: pickString(data.sku, data.SKU),
     pnk: pickString(data.pnk, data.PNK),
     oldFeeCny: toNumber(data.oldFeeCny ?? data.old_fee_cny ?? data.oldFee),
     newFeeCny: toNumber(data.newFeeCny ?? data.new_fee_cny ?? data.newFee ?? data.feeCny ?? data.fee_cny),
-    matchStatus: pickString(data.matchStatus, data.match_status, data.status),
     affectedStoreProductCount: toNumber(data.affectedStoreProductCount ?? data.affected_store_product_count),
     message: pickString(data.message, data.errorMessage, data.error_message, data.reason),
-    status: pickString(data.status, data.result) || 'UNKNOWN',
+    status: pickString(data.status, data.result) || '-',
   };
 }
 
 function normalizePreviewSummary(raw: unknown): PreviewSummary {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
   return {
-    success: toNumber(data.success ?? data.successCount) ?? 0,
-    unchanged: toNumber(data.unchanged ?? data.unchangedCount) ?? 0,
-    errors: toNumber(data.errors ?? data.errorCount ?? data.failed) ?? 0,
-    ambiguous: toNumber(data.ambiguous ?? data.ambiguousCount) ?? 0,
-    unmapped: toNumber(data.unmapped ?? data.unmappedCount) ?? 0,
+    total: toNumber(data.total),
+    planned: toNumber(data.planned),
+    updated: toNumber(data.updated),
+    unchanged: toNumber(data.unchanged),
+    failed: toNumber(data.failed),
+    affectedStoreProductCount: toNumber(data.affectedStoreProductCount ?? data.affected_store_product_count),
+    profitRecalculatedCount: toNumber(data.profitRecalculatedCount ?? data.profit_recalculated_count),
   };
 }
 
@@ -132,14 +157,20 @@ function parseImportRows(rawRows: Record<string, unknown>[]): { rows: ImportRow[
   const errors: string[] = [];
   rawRows.forEach((row, index) => {
     const line = index + 2;
-    const scope = getString(row, ['scope', 'Scope', '适用范围']).toUpperCase();
+    const rawScope = getString(row, ['scope', 'Scope', '适用范围']);
+    const scope = normalizeScopeValue(rawScope);
     const sku = getString(row, ['SKU', 'sku', 'Sku']);
     const pnk = getString(row, ['PNK', 'pnk', 'Pnk']);
     const note = getString(row, ['note', 'Note', '备注']);
     const shopRaw = getString(row, ['shopId', 'shop_id', 'ShopId', '店铺ID']);
+    const storeProductRaw = getString(row, ['storeProductId', 'store_product_id', 'StoreProductId']);
     const feeRaw = getString(row, ['feeCny', 'fee_cny', 'fee', 'FeeCny', 'FBE费用']);
-    if (!scope) {
+    if (!rawScope) {
       errors.push(`第 ${line} 行：缺少 scope`);
+      return;
+    }
+    if (scope !== 'PRODUCT_DEFAULT' && scope !== 'STORE_PRODUCT_OVERRIDE') {
+      errors.push(`第 ${line} 行：scope 必须为 PRODUCT_DEFAULT 或 STORE_PRODUCT_OVERRIDE`);
       return;
     }
     if (!sku && !pnk) {
@@ -159,13 +190,19 @@ function parseImportRows(rawRows: Record<string, unknown>[]): { rows: ImportRow[
       errors.push(`第 ${line} 行：shopId 无效`);
       return;
     }
-    if (scope === 'SHOP_OVERRIDE' && !shopId) {
-      errors.push(`第 ${line} 行：SHOP_OVERRIDE 必须填写 shopId`);
+    const storeProductId = storeProductRaw ? Number(storeProductRaw) : null;
+    if (storeProductRaw && !Number.isFinite(storeProductId)) {
+      errors.push(`第 ${line} 行：storeProductId 无效`);
+      return;
+    }
+    if (scope === 'STORE_PRODUCT_OVERRIDE' && !shopId) {
+      errors.push(`第 ${line} 行：STORE_PRODUCT_OVERRIDE 必须填写 shopId`);
       return;
     }
     rows.push({
       scope,
       shopId,
+      storeProductId,
       sku,
       pnk,
       feeCny: Number(feeRaw),
@@ -173,6 +210,22 @@ function parseImportRows(rawRows: Record<string, unknown>[]): { rows: ImportRow[
     });
   });
   return { rows, errors };
+}
+
+function buildBatchRows(importRows: ImportRow[]): Record<string, unknown>[] {
+  return importRows.map((row) => {
+    const payload: Record<string, unknown> = {
+      scope: row.scope,
+      feeCny: row.feeCny,
+      note: row.note || undefined,
+      source: 'IMPORT',
+    };
+    if (row.shopId != null) payload.shopId = row.shopId;
+    if (row.storeProductId != null) payload.storeProductId = row.storeProductId;
+    if (row.sku) payload.sku = row.sku;
+    if (row.pnk) payload.pnk = row.pnk;
+    return payload;
+  });
 }
 
 export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: FbeFeeBatchImportModalProps) {
@@ -183,7 +236,7 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
   const [executeLoading, setExecuteLoading] = useState(false);
   const [previewRows, setPreviewRows] = useState<PreviewRow[]>([]);
   const [previewSummary, setPreviewSummary] = useState<PreviewSummary | null>(null);
-  const [executePayload, setExecutePayload] = useState<Record<string, unknown> | null>(null);
+  const [executePayload, setExecutePayload] = useState<{ rows: Record<string, unknown>[] } | null>(null);
   const [step, setStep] = useState<'upload' | 'preview'>('upload');
 
   const resetState = () => {
@@ -205,10 +258,10 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
     downloadXlsxTemplate({
       headers: ['scope', 'shopId', 'SKU', 'PNK', 'feeCny', 'note'],
       sampleRows: [
-        ['SKU_DEFAULT', '', 'ABC-001', 'PNK123', 12.5, 'SKU 默认费用示例'],
-        ['SHOP_OVERRIDE', 1, 'ABC-001', 'PNK123', 15, '店铺覆盖示例'],
+        ['PRODUCT_DEFAULT', '', 'ABC-001', 'PNK123', 12.5, 'SKU 默认费用示例'],
+        ['STORE_PRODUCT_OVERRIDE', 1, 'ABC-001', 'PNK123', 15, '店铺覆盖示例'],
       ],
-      colWidths: [16, 10, 16, 16, 10, 24],
+      colWidths: [22, 10, 16, 16, 10, 24],
       filename: 'FBE费用批量导入模板.xlsx',
       sheetName: 'FBE费用',
     });
@@ -235,24 +288,17 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
         return;
       }
       setImportRows(rows);
-      const items = rows.map((row) => ({
-        scope: row.scope,
-        shopId: row.shopId ?? undefined,
-        sku: row.sku || undefined,
-        pnk: row.pnk || undefined,
-        feeCny: row.feeCny,
-        note: row.note || undefined,
-      }));
-      const { data: res } = await request.post<ApiResponse<unknown>>('/fbe-fees/batch/preview', { items });
+      const batchRows = buildBatchRows(rows);
+      const { data: res } = await request.post<ApiResponse<unknown>>('/fbe-fees/batch/preview', { rows: batchRows });
       if (Number(res.code) !== 200) {
         message.warning(res.message || '预览失败');
         return;
       }
       const data = res.data && typeof res.data === 'object' ? res.data as Record<string, unknown> : {};
-      const previewList = getListPayload(data.items ?? data.rows ?? data.results ?? data).map((item, index) => normalizePreviewRow(item, index));
+      const previewList = getListPayload(data.items ?? data.rows ?? data).map((item, index) => normalizePreviewRow(item, index));
       setPreviewRows(previewList);
-      setPreviewSummary(normalizePreviewSummary(data.summary ?? data.stats ?? data));
-      setExecutePayload({ items });
+      setPreviewSummary(normalizePreviewSummary(data));
+      setExecutePayload({ rows: batchRows });
       setStep('preview');
     } catch (err) {
       handleFeeApiError(err, '预览失败');
@@ -268,8 +314,8 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
       const { data: res } = await request.post<ApiResponse<unknown>>('/fbe-fees/batch/execute', executePayload);
       if (Number(res.code) === 200) {
         const data = res.data && typeof res.data === 'object' ? res.data as Record<string, unknown> : {};
-        const updated = data.updatedCount ?? data.updated_count ?? data.updated;
-        const recalc = data.profitRecalcCount ?? data.profit_recalc_count;
+        const updated = data.updated;
+        const recalc = data.profitRecalculatedCount ?? data.profit_recalculated_count;
         message.success(`导入完成${updated != null ? `，更新 ${updated} 条` : ''}${recalc != null ? `，利润重算 ${recalc} 条` : ''}`);
         resetState();
         onSuccess();
@@ -284,13 +330,13 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
   };
 
   const previewColumns: ColumnsType<PreviewRow> = useMemo(() => [
-    { title: 'scope', dataIndex: 'scope', width: 120 },
+    { title: 'scope', dataIndex: 'scopeLabel', width: 120 },
     { title: 'shopId', dataIndex: 'shopId', width: 80, render: (v) => v ?? '-' },
     { title: 'SKU', dataIndex: 'sku', width: 110 },
     { title: 'PNK', dataIndex: 'pnk', width: 110 },
     { title: '旧费用', width: 90, render: (_: unknown, r) => fmtMoneyCny(r.oldFeeCny) },
     { title: '新费用', width: 90, render: (_: unknown, r) => fmtMoneyCny(r.newFeeCny) },
-    { title: '匹配', dataIndex: 'matchStatus', width: 90 },
+    { title: '状态', dataIndex: 'status', width: 90 },
     { title: '影响数', width: 80, render: (_: unknown, r) => r.affectedStoreProductCount ?? '-' },
     { title: '说明', dataIndex: 'message', width: 180, ellipsis: true },
   ], []);
@@ -315,8 +361,8 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
       <Alert
         type="info"
         showIcon
-        message="模板字段：scope / shopId / SKU / PNK / feeCny / note"
-        description="导入流程：上传 → 前端解析 → batch/preview → 确认 → batch/execute。禁止前端直接改成本或利润。"
+        message="模板 scope：PRODUCT_DEFAULT / STORE_PRODUCT_OVERRIDE"
+        description="导入流程：上传 → 前端解析 → batch/preview（rows + source=IMPORT）→ 确认 → batch/execute。"
         style={{ marginBottom: 12 }}
       />
 
@@ -349,18 +395,20 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
             />
           )}
           {importRows.length > 0 && (
-            <TextHint count={importRows.length} />
+            <Alert type="success" showIcon message={`已解析 ${importRows.length} 行，可点击「解析并预览」提交后端校验`} style={{ marginTop: 12 }} />
           )}
         </>
       ) : (
         <>
           {previewSummary && (
             <Space wrap style={{ marginBottom: 12 }}>
-              <Tag color="success">成功 {previewSummary.success}</Tag>
-              <Tag>未变化 {previewSummary.unchanged}</Tag>
-              <Tag color="error">错误 {previewSummary.errors}</Tag>
-              <Tag color="warning">歧义 {previewSummary.ambiguous}</Tag>
-              <Tag>缺映射 {previewSummary.unmapped}</Tag>
+              <Tag>总计 {previewSummary.total ?? '-'}</Tag>
+              <Tag color="processing">计划 {previewSummary.planned ?? '-'}</Tag>
+              <Tag color="success">更新 {previewSummary.updated ?? '-'}</Tag>
+              <Tag>未变化 {previewSummary.unchanged ?? '-'}</Tag>
+              <Tag color="error">失败 {previewSummary.failed ?? '-'}</Tag>
+              <Tag color="blue">影响店铺商品 {previewSummary.affectedStoreProductCount ?? '-'}</Tag>
+              <Tag color="purple">利润重算 {previewSummary.profitRecalculatedCount ?? '-'}</Tag>
             </Space>
           )}
           <Table<PreviewRow>
@@ -374,11 +422,5 @@ export default function FbeFeeBatchImportModal({ open, onCancel, onSuccess }: Fb
         </>
       )}
     </Modal>
-  );
-}
-
-function TextHint({ count }: { count: number }) {
-  return (
-    <Alert type="success" showIcon message={`已解析 ${count} 行，可点击「解析并预览」提交后端校验`} style={{ marginTop: 12 }} />
   );
 }

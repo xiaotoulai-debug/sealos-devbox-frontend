@@ -11,8 +11,8 @@ import FbeFeeBatchImportModal from './FbeFeeBatchImportModal';
 
 const { Text } = Typography;
 
-type FeeStatusFilter = 'ALL' | 'ACTUAL' | 'ESTIMATED' | 'UNMAPPED';
-type FeeScopeType = 'SKU_DEFAULT' | 'SHOP_OVERRIDE' | string;
+type FeeStatusFilter = 'ALL' | 'ACTUAL' | 'ESTIMATED' | 'MISSING_MAPPING';
+type FeeScopeValue = 'PRODUCT_DEFAULT' | 'STORE_PRODUCT_OVERRIDE';
 
 interface ApiResponse<T> {
   code: number | string;
@@ -28,17 +28,20 @@ interface ShopOption {
 }
 
 interface FbeFeeSummary {
-  actualCoverageRate: number | null;
-  skuDefaultFeeCount: number | null;
-  shopOverrideFeeCount: number | null;
-  estimated7RmbCount: number | null;
-  grabCartBlockedByFbeCount: number | null;
+  activeStoreProductTotal: number | null;
+  actualFbeStoreProductCount: number | null;
+  estimatedFbeStoreProductCount: number | null;
+  productDefaultCount: number | null;
+  storeOverrideCount: number | null;
+  missingProductMappingCount: number | null;
+  actualFbeCoveragePct: number | null;
+  grabCartCandidateCount: number | null;
+  grabCartBlockedByEstimatedFbeCount: number | null;
 }
 
 interface FbeFeeRecord {
   key: string;
   storeProductId: number | null;
-  productId: number | null;
   shopId: number | null;
   shopName: string;
   region: string;
@@ -46,44 +49,51 @@ interface FbeFeeRecord {
   pnk: string;
   productName: string;
   effectiveFbeFeeCny: number | null;
+  productDefaultFbeFeeCny: number | null;
+  storeOverrideFbeFeeCny: number | null;
   feeScope: string;
   feeScopeLabel: string;
   source: string;
   updatedAt: string | null;
+  note: string;
+  isEstimatedFbe: boolean | null;
   profitMarginPct: number | null;
-  grabCartCostStatus: string;
+  grabCartCostReady: boolean | null;
+  blockReason: string;
 }
 
 interface BatchPreviewRow {
   key: string;
   scope: string;
+  scopeLabel: string;
   shopId: number | null;
   sku: string;
   pnk: string;
   oldFeeCny: number | null;
   newFeeCny: number | null;
-  matchStatus: string;
   affectedStoreProductCount: number | null;
   message: string;
   status: string;
 }
 
 interface BatchPreviewSummary {
-  success: number;
-  unchanged: number;
-  errors: number;
-  ambiguous: number;
-  unmapped: number;
+  total: number | null;
+  planned: number | null;
+  updated: number | null;
+  unchanged: number | null;
+  failed: number | null;
+  affectedStoreProductCount: number | null;
+  profitRecalculatedCount: number | null;
 }
 
 interface BatchPreviewResult {
   rows: BatchPreviewRow[];
   summary: BatchPreviewSummary;
-  executePayload: Record<string, unknown>;
+  executePayload: { rows: Record<string, unknown>[] };
 }
 
 interface EditFormValues {
-  scope: 'SKU_DEFAULT' | 'SHOP_OVERRIDE';
+  scope: FeeScopeValue;
   feeCny: number;
   note?: string;
 }
@@ -106,6 +116,13 @@ function normalizeEnum(value: unknown): string {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
 }
 
+function normalizeScopeValue(scope: string): FeeScopeValue | string {
+  const s = normalizeEnum(scope);
+  if (s === 'PRODUCT_DEFAULT' || s === 'SKU_DEFAULT' || s === 'SKU') return 'PRODUCT_DEFAULT';
+  if (s === 'STORE_PRODUCT_OVERRIDE' || s === 'SHOP_OVERRIDE' || s === 'SHOP') return 'STORE_PRODUCT_OVERRIDE';
+  return s;
+}
+
 function normalizePercent(value: number | null): number | null {
   if (value == null) return null;
   return Math.abs(value) <= 1 ? value * 100 : value;
@@ -122,6 +139,16 @@ function fmtPct(value: number | null | undefined): string {
   return `${pct.toFixed(2)}%`;
 }
 
+function fmtCoveragePct(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(Number(value))) return '-';
+  return `${(Math.abs(value) <= 1 ? value * 100 : value).toFixed(1)}%`;
+}
+
+function fmtCount(value: number | null | undefined): string | number {
+  if (value == null || Number.isNaN(Number(value))) return '-';
+  return value;
+}
+
 function fmtDateTime(value: string | null | undefined): string {
   if (!value) return '-';
   const date = new Date(value);
@@ -131,9 +158,9 @@ function fmtDateTime(value: string | null | undefined): string {
 
 function getFeeScopeLabel(scope: string): string {
   const s = normalizeEnum(scope);
-  if (s === 'SHOP_OVERRIDE' || s === 'SHOP') return '店铺覆盖';
-  if (s === 'SKU_DEFAULT' || s === 'SKU') return 'SKU默认';
-  if (s.includes('ESTIMATED') || s === 'DEFAULT_7RMB' || s === '7_RMB') return '7 RMB估算';
+  if (s === 'STORE_PRODUCT_OVERRIDE' || s === 'SHOP_OVERRIDE' || s === 'SHOP') return '店铺覆盖';
+  if (s === 'PRODUCT_DEFAULT' || s === 'SKU_DEFAULT' || s === 'SKU') return 'SKU默认';
+  if (s === 'DEFAULT_FALLBACK' || s.includes('FALLBACK') || s === 'DEFAULT_7RMB' || s === '7_RMB') return '7 RMB估算';
   return scope || '-';
 }
 
@@ -150,16 +177,17 @@ function getListPayload(payload: unknown): unknown[] {
 
 function normalizeSummary(raw: unknown): FbeFeeSummary {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
-  const rate = toNumber(data.actualCoverageRate ?? data.actual_coverage_rate ?? data.coverageRate ?? data.coverage_rate);
   return {
-    actualCoverageRate: rate,
-    skuDefaultFeeCount: toNumber(data.skuDefaultFeeCount ?? data.sku_default_fee_count),
-    shopOverrideFeeCount: toNumber(data.shopOverrideFeeCount ?? data.shop_override_fee_count),
-    estimated7RmbCount: toNumber(
-      data.estimated7RmbCount ?? data.estimated_7_rmb_count ?? data.estimatedCount ?? data.estimated_count,
-    ),
-    grabCartBlockedByFbeCount: toNumber(
-      data.grabCartBlockedByFbeCount ?? data.grab_cart_blocked_by_fbe_count ?? data.grabCartBlockedCount,
+    activeStoreProductTotal: toNumber(data.activeStoreProductTotal ?? data.active_store_product_total),
+    actualFbeStoreProductCount: toNumber(data.actualFbeStoreProductCount ?? data.actual_fbe_store_product_count),
+    estimatedFbeStoreProductCount: toNumber(data.estimatedFbeStoreProductCount ?? data.estimated_fbe_store_product_count),
+    productDefaultCount: toNumber(data.productDefaultCount ?? data.product_default_count),
+    storeOverrideCount: toNumber(data.storeOverrideCount ?? data.store_override_count),
+    missingProductMappingCount: toNumber(data.missingProductMappingCount ?? data.missing_product_mapping_count),
+    actualFbeCoveragePct: toNumber(data.actualFbeCoveragePct ?? data.actual_fbe_coverage_pct),
+    grabCartCandidateCount: toNumber(data.grabCartCandidateCount ?? data.grab_cart_candidate_count),
+    grabCartBlockedByEstimatedFbeCount: toNumber(
+      data.grabCartBlockedByEstimatedFbeCount ?? data.grab_cart_blocked_by_estimated_fbe_count,
     ),
   };
 }
@@ -167,55 +195,68 @@ function normalizeSummary(raw: unknown): FbeFeeSummary {
 function normalizeRecord(raw: unknown, index: number): FbeFeeRecord {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
   const shop = data.shop && typeof data.shop === 'object' ? data.shop as Record<string, unknown> : {};
-  const feeScope = pickString(data.feeScope, data.fee_scope, data.scope, data.effectiveScope, data.effective_scope);
+  const feeScope = pickString(data.fbeScope, data.fbe_scope, data.feeScope, data.fee_scope, data.scope);
+  const grabCartCostReady = data.grabCartCostReady === true || data.grab_cart_cost_ready === true
+    ? true
+    : data.grabCartCostReady === false || data.grab_cart_cost_ready === false
+      ? false
+      : null;
   return {
     key: String(data.id ?? data.storeProductId ?? data.store_product_id ?? `row-${index}`),
     storeProductId: toNumber(data.storeProductId ?? data.store_product_id),
-    productId: toNumber(data.productId ?? data.product_id),
     shopId: toNumber(data.shopId ?? data.shop_id ?? shop.id),
     shopName: pickString(data.shopName, data.shop_name, shop.shopName, shop.shop_name, shop.name),
     region: pickString(data.region, data.site, shop.region, shop.site),
-    sku: pickString(data.sku, data.vendorSku, data.vendor_sku),
-    pnk: pickString(data.pnk, data.partNumberKey, data.part_number_key, data.partNumber, data.part_number),
+    sku: pickString(data.SKU, data.sku, data.vendorSku, data.vendor_sku),
+    pnk: pickString(data.PNK, data.pnk, data.partNumberKey, data.part_number_key, data.partNumber, data.part_number),
     productName: pickString(data.productName, data.product_name, data.title, data.name),
-    effectiveFbeFeeCny: toNumber(
-      data.effectiveFbeFeeCny ?? data.effective_fbe_fee_cny ?? data.fbeFeeCny ?? data.fbe_fee_cny ?? data.fbeFee ?? data.fbe_fee,
-    ),
+    effectiveFbeFeeCny: toNumber(data.effectiveFbeFeeCny ?? data.effective_fbe_fee_cny),
+    productDefaultFbeFeeCny: toNumber(data.productDefaultFbeFeeCny ?? data.product_default_fbe_fee_cny),
+    storeOverrideFbeFeeCny: toNumber(data.storeOverrideFbeFeeCny ?? data.store_override_fbe_fee_cny),
     feeScope,
     feeScopeLabel: getFeeScopeLabel(feeScope),
-    source: pickString(data.source, data.feeSource, data.fee_source),
-    updatedAt: pickString(data.updatedAt, data.updated_at),
-    profitMarginPct: toNumber(data.profitMarginPct ?? data.profit_margin_pct ?? data.grossMarginPct ?? data.gross_margin_pct),
-    grabCartCostStatus: pickString(data.grabCartCostStatus, data.grab_cart_cost_status, data.costStatus, data.cost_status),
+    source: pickString(data.fbeSource, data.fbe_source, data.source),
+    updatedAt: pickString(data.fbeUpdatedAt, data.fbe_updated_at, data.updatedAt, data.updated_at),
+    note: pickString(data.fbeNote, data.fbe_note, data.note),
+    isEstimatedFbe: data.isEstimatedFbe === true || data.is_estimated_fbe === true
+      ? true
+      : data.isEstimatedFbe === false || data.is_estimated_fbe === false
+        ? false
+        : null,
+    profitMarginPct: toNumber(data.profitMarginPct ?? data.profit_margin_pct),
+    grabCartCostReady,
+    blockReason: pickString(data.blockReason, data.block_reason),
   };
 }
 
 function normalizePreviewRow(raw: unknown, index: number): BatchPreviewRow {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
-  const status = pickString(data.status, data.result, data.matchStatus, data.match_status) || 'UNKNOWN';
+  const scope = pickString(data.scope);
   return {
-    key: String(data.id ?? data.sku ?? data.pnk ?? `preview-${index}`),
-    scope: pickString(data.scope),
+    key: String(data.id ?? data.sku ?? data.pnk ?? data.storeProductId ?? `preview-${index}`),
+    scope,
+    scopeLabel: getFeeScopeLabel(scope),
     shopId: toNumber(data.shopId ?? data.shop_id),
-    sku: pickString(data.sku, data.vendorSku, data.vendor_sku),
-    pnk: pickString(data.pnk, data.partNumberKey, data.part_number_key),
+    sku: pickString(data.sku, data.SKU),
+    pnk: pickString(data.pnk, data.PNK),
     oldFeeCny: toNumber(data.oldFeeCny ?? data.old_fee_cny ?? data.oldFee ?? data.old_fee),
     newFeeCny: toNumber(data.newFeeCny ?? data.new_fee_cny ?? data.newFee ?? data.new_fee ?? data.feeCny ?? data.fee_cny),
-    matchStatus: pickString(data.matchStatus, data.match_status, data.status),
-    affectedStoreProductCount: toNumber(data.affectedStoreProductCount ?? data.affected_store_product_count ?? data.affectedCount),
+    affectedStoreProductCount: toNumber(data.affectedStoreProductCount ?? data.affected_store_product_count),
     message: pickString(data.message, data.errorMessage, data.error_message, data.reason),
-    status,
+    status: pickString(data.status, data.result) || '-',
   };
 }
 
 function normalizePreviewSummary(raw: unknown): BatchPreviewSummary {
   const data = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
   return {
-    success: toNumber(data.success ?? data.successCount ?? data.success_count) ?? 0,
-    unchanged: toNumber(data.unchanged ?? data.unchangedCount ?? data.unchanged_count) ?? 0,
-    errors: toNumber(data.errors ?? data.errorCount ?? data.error_count ?? data.failed) ?? 0,
-    ambiguous: toNumber(data.ambiguous ?? data.ambiguousCount ?? data.ambiguous_count) ?? 0,
-    unmapped: toNumber(data.unmapped ?? data.unmappedCount ?? data.unmapped_count) ?? 0,
+    total: toNumber(data.total),
+    planned: toNumber(data.planned),
+    updated: toNumber(data.updated),
+    unchanged: toNumber(data.unchanged),
+    failed: toNumber(data.failed),
+    affectedStoreProductCount: toNumber(data.affectedStoreProductCount ?? data.affected_store_product_count),
+    profitRecalculatedCount: toNumber(data.profitRecalculatedCount ?? data.profit_recalculated_count),
   };
 }
 
@@ -240,13 +281,15 @@ function handleFeeApiError(err: unknown, fallback: string) {
   }
 }
 
-function renderCostStatusTag(status: string) {
-  const s = normalizeEnum(status);
-  if (!s) return <Tag>-</Tag>;
-  if (s === 'COMPLETE' || s === 'READY' || s === 'ACTUAL') return <Tag color="success">{status}</Tag>;
-  if (s === 'ESTIMATED' || s.includes('7_RMB') || s.includes('ESTIMATE')) return <Tag color="warning">{status}</Tag>;
-  if (s === 'MISSING' || s === 'UNMAPPED') return <Tag color="error">{status}</Tag>;
-  return <Tag>{status}</Tag>;
+function renderGrabCartCostStatus(record: FbeFeeRecord) {
+  if (record.grabCartCostReady === true) {
+    return <Tag color="success">可进入候选计算</Tag>;
+  }
+  return (
+    <Tag color="error">
+      {record.blockReason || '不可进入候选计算'}
+    </Tag>
+  );
 }
 
 export default function FbeFeeManagement() {
@@ -261,7 +304,7 @@ export default function FbeFeeManagement() {
   const [shopId, setShopId] = useState<number | null>(null);
   const [keyword, setKeyword] = useState('');
   const [appliedKeyword, setAppliedKeyword] = useState('');
-  const [feeStatus, setFeeStatus] = useState<FeeStatusFilter>('ALL');
+  const [statusFilter, setStatusFilter] = useState<FeeStatusFilter>('ALL');
 
   const [editOpen, setEditOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<FbeFeeRecord | null>(null);
@@ -286,9 +329,7 @@ export default function FbeFeeManagement() {
   const loadSummary = useCallback(async () => {
     setSummaryLoading(true);
     try {
-      const { data: res } = await request.get<ApiResponse<unknown>>('/fbe-fees/summary', {
-        params: { shopId: shopId ?? undefined },
-      });
+      const { data: res } = await request.get<ApiResponse<unknown>>('/fbe-fees/summary');
       if (Number(res.code) === 200) setSummary(normalizeSummary(res.data));
       else setSummary(null);
     } catch {
@@ -296,7 +337,7 @@ export default function FbeFeeManagement() {
     } finally {
       setSummaryLoading(false);
     }
-  }, [shopId]);
+  }, []);
 
   const loadRecords = useCallback(async () => {
     setLoading(true);
@@ -305,8 +346,7 @@ export default function FbeFeeManagement() {
         params: {
           shopId: shopId ?? undefined,
           keyword: appliedKeyword || undefined,
-          search: appliedKeyword || undefined,
-          feeStatus: feeStatus !== 'ALL' ? feeStatus : undefined,
+          status: statusFilter,
           page,
           pageSize,
         },
@@ -329,7 +369,7 @@ export default function FbeFeeManagement() {
     } finally {
       setLoading(false);
     }
-  }, [shopId, appliedKeyword, feeStatus, page, pageSize]);
+  }, [shopId, appliedKeyword, statusFilter, page, pageSize]);
 
   const refreshAll = useCallback(() => {
     loadSummary();
@@ -343,27 +383,31 @@ export default function FbeFeeManagement() {
   const openEdit = (record: FbeFeeRecord) => {
     setEditTarget(record);
     setPreviewResult(null);
+    const scope = normalizeScopeValue(record.feeScope);
     editForm.setFieldsValue({
-      scope: record.shopId ? 'SHOP_OVERRIDE' : 'SKU_DEFAULT',
+      scope: scope === 'STORE_PRODUCT_OVERRIDE' ? 'STORE_PRODUCT_OVERRIDE' : 'PRODUCT_DEFAULT',
       feeCny: record.effectiveFbeFeeCny ?? undefined,
-      note: '',
+      note: record.note || '',
     });
     setEditOpen(true);
   };
 
-  const buildSingleItemPayload = (values: EditFormValues): Record<string, unknown> => {
+  const buildSingleRowPayload = (values: EditFormValues): Record<string, unknown> => {
     const target = editTarget;
-    const item: Record<string, unknown> = {
-      scope: values.scope,
+    const scope = normalizeScopeValue(values.scope) as FeeScopeValue;
+    const row: Record<string, unknown> = {
+      scope,
       feeCny: values.feeCny,
       note: values.note?.trim() || undefined,
+      source: 'MANUAL',
     };
-    if (values.scope === 'SHOP_OVERRIDE' && target?.shopId) item.shopId = target.shopId;
-    if (target?.sku) item.sku = target.sku;
-    if (target?.pnk) item.pnk = target.pnk;
-    if (target?.productId) item.productId = target.productId;
-    if (target?.storeProductId) item.storeProductId = target.storeProductId;
-    return item;
+    if (scope === 'STORE_PRODUCT_OVERRIDE') {
+      if (target?.shopId) row.shopId = target.shopId;
+      if (target?.storeProductId) row.storeProductId = target.storeProductId;
+    }
+    if (target?.sku) row.sku = target.sku;
+    if (target?.pnk) row.pnk = target.pnk;
+    return row;
   };
 
   const handlePreviewSubmit = async () => {
@@ -373,21 +417,30 @@ export default function FbeFeeManagement() {
     } catch {
       return;
     }
+    const scope = normalizeScopeValue(values.scope);
+    if (scope === 'STORE_PRODUCT_OVERRIDE' && (!editTarget?.shopId || !editTarget?.storeProductId)) {
+      message.error('店铺覆盖必须同时提供 shopId 与 storeProductId');
+      return;
+    }
+    if (scope === 'PRODUCT_DEFAULT' && !editTarget?.sku && !editTarget?.pnk) {
+      message.error('SKU 默认费用至少需要 sku 或 pnk');
+      return;
+    }
     setPreviewLoading(true);
     try {
-      const items = [buildSingleItemPayload(values)];
-      const { data: res } = await request.post<ApiResponse<unknown>>('/fbe-fees/batch/preview', { items });
+      const rows = [buildSingleRowPayload(values)];
+      const { data: res } = await request.post<ApiResponse<unknown>>('/fbe-fees/batch/preview', { rows });
       if (Number(res.code) !== 200) {
         message.warning(res.message || '预览失败');
         return;
       }
       const data = res.data && typeof res.data === 'object' ? res.data as Record<string, unknown> : {};
-      const rows = getListPayload(data.items ?? data.rows ?? data.results ?? data).map((item, index) => normalizePreviewRow(item, index));
-      const summaryData = normalizePreviewSummary(data.summary ?? data.stats ?? data);
+      const previewRows = getListPayload(data.items ?? data.rows ?? data).map((item, index) => normalizePreviewRow(item, index));
+      const summaryData = normalizePreviewSummary(data);
       setPreviewResult({
-        rows,
+        rows: previewRows,
         summary: summaryData,
-        executePayload: { items },
+        executePayload: { rows },
       });
       setEditOpen(false);
       setPreviewOpen(true);
@@ -408,8 +461,8 @@ export default function FbeFeeManagement() {
       );
       if (Number(res.code) === 200) {
         const data = res.data && typeof res.data === 'object' ? res.data as Record<string, unknown> : {};
-        const updated = toNumber(data.updatedCount ?? data.updated_count ?? data.updated);
-        const recalc = toNumber(data.profitRecalcCount ?? data.profit_recalc_count ?? data.recalculatedCount);
+        const updated = toNumber(data.updated);
+        const recalc = toNumber(data.profitRecalculatedCount ?? data.profit_recalculated_count);
         message.success(`FBE 费用已更新${updated != null ? `：${updated} 条` : ''}${recalc != null ? `，利润重算 ${recalc} 条` : ''}`);
         setPreviewOpen(false);
         setPreviewResult(null);
@@ -429,20 +482,22 @@ export default function FbeFeeManagement() {
     downloadXlsxTemplate({
       headers: ['scope', 'shopId', 'SKU', 'PNK', 'feeCny', 'note'],
       sampleRows: [
-        ['SKU_DEFAULT', '', 'ABC-001', 'PNK123', 12.5, 'SKU 默认费用示例'],
-        ['SHOP_OVERRIDE', 1, 'ABC-001', 'PNK123', 15, '店铺覆盖示例'],
+        ['PRODUCT_DEFAULT', '', 'ABC-001', 'PNK123', 12.5, 'SKU 默认费用示例'],
+        ['STORE_PRODUCT_OVERRIDE', 1, 'ABC-001', 'PNK123', 15, '店铺覆盖示例'],
       ],
-      colWidths: [16, 10, 16, 16, 10, 24],
+      colWidths: [22, 10, 16, 16, 10, 24],
       filename: 'FBE费用批量导入模板.xlsx',
       sheetName: 'FBE费用',
     });
   };
 
-  const coveragePct = useMemo(() => {
-    const rate = summary?.actualCoverageRate;
-    if (rate == null) return '-';
-    return `${(Math.abs(rate) <= 1 ? rate * 100 : rate).toFixed(1)}%`;
-  }, [summary]);
+  const summaryCards = useMemo(() => [
+    { title: '实际 FBE 覆盖率', value: fmtCoveragePct(summary?.actualFbeCoveragePct) },
+    { title: '已录入 SKU 默认费用', value: fmtCount(summary?.productDefaultCount) },
+    { title: '已录入店铺覆盖费用', value: fmtCount(summary?.storeOverrideCount) },
+    { title: '仍使用 7 RMB 估算', value: fmtCount(summary?.estimatedFbeStoreProductCount) },
+    { title: '受 FBE 估算影响抢车', value: fmtCount(summary?.grabCartBlockedByEstimatedFbeCount) },
+  ], [summary]);
 
   const columns: ColumnsType<FbeFeeRecord> = [
     {
@@ -483,9 +538,8 @@ export default function FbeFeeManagement() {
     },
     {
       title: '抢车成本状态',
-      dataIndex: 'grabCartCostStatus',
-      width: 120,
-      render: (value: string) => renderCostStatusTag(value),
+      width: 160,
+      render: (_: unknown, record) => renderGrabCartCostStatus(record),
     },
     {
       title: '操作',
@@ -500,12 +554,12 @@ export default function FbeFeeManagement() {
   ];
 
   const previewColumns: ColumnsType<BatchPreviewRow> = [
-    { title: 'scope', dataIndex: 'scope', width: 120 },
+    { title: 'scope', dataIndex: 'scopeLabel', width: 120 },
     { title: 'SKU', dataIndex: 'sku', width: 120 },
     { title: 'PNK', dataIndex: 'pnk', width: 120 },
     { title: '旧费用', width: 90, render: (_: unknown, r) => fmtMoneyCny(r.oldFeeCny) },
     { title: '新费用', width: 90, render: (_: unknown, r) => fmtMoneyCny(r.newFeeCny) },
-    { title: '匹配', dataIndex: 'matchStatus', width: 100 },
+    { title: '状态', dataIndex: 'status', width: 100 },
     { title: '影响店铺商品数', width: 120, render: (_: unknown, r) => r.affectedStoreProductCount ?? '-' },
     { title: '说明', dataIndex: 'message', width: 200, ellipsis: true },
   ];
@@ -515,19 +569,13 @@ export default function FbeFeeManagement() {
       <Alert
         type="info"
         showIcon
-        message="费用币种：CNY"
-        description="优先级：店铺覆盖 > SKU默认 > 7 RMB估算。前端不直接改成本/利润，全部以后端返回为准。"
+        message="费用币种：CNY · 全店汇总"
+        description="优先级：店铺覆盖 > SKU默认 > 7 RMB估算。概览为全店汇总，不随列表店铺筛选变化；前端不直接改成本/利润，全部以后端返回为准。"
         style={{ marginBottom: 16 }}
       />
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        {[
-          { title: '实际 FBE 覆盖率', value: coveragePct },
-          { title: '已录入 SKU 默认费用', value: summary?.skuDefaultFeeCount ?? '-' },
-          { title: '已录入店铺覆盖费用', value: summary?.shopOverrideFeeCount ?? '-' },
-          { title: '仍使用 7 RMB 估算', value: summary?.estimated7RmbCount ?? '-' },
-          { title: '受 FBE 缺失影响抢车', value: summary?.grabCartBlockedByFbeCount ?? '-' },
-        ].map((item) => (
+        {summaryCards.map((item) => (
           <Col key={item.title} xs={24} sm={12} md={8} lg={24 / 5}>
             <Card size="small" loading={summaryLoading}>
               <Statistic title={item.title} value={item.value} />
@@ -535,6 +583,12 @@ export default function FbeFeeManagement() {
           </Col>
         ))}
       </Row>
+
+      {summary && (
+        <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+          全店活跃店铺商品 {fmtCount(summary.activeStoreProductTotal)} · 实际 FBE {fmtCount(summary.actualFbeStoreProductCount)} · 缺映射 {fmtCount(summary.missingProductMappingCount)} · 抢车候选 {fmtCount(summary.grabCartCandidateCount)}
+        </Text>
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
         <Space wrap>
@@ -555,14 +609,14 @@ export default function FbeFeeManagement() {
             onSearch={(v) => { setAppliedKeyword(v.trim()); setPage(1); }}
           />
           <Select<FeeStatusFilter>
-            value={feeStatus}
-            style={{ width: 140 }}
-            onChange={(val) => { setFeeStatus(val); setPage(1); }}
+            value={statusFilter}
+            style={{ width: 160 }}
+            onChange={(val) => { setStatusFilter(val); setPage(1); }}
             options={[
               { value: 'ALL', label: '费用状态：全部' },
               { value: 'ACTUAL', label: '实际费用' },
               { value: 'ESTIMATED', label: '估算费用' },
-              { value: 'UNMAPPED', label: '缺映射' },
+              { value: 'MISSING_MAPPING', label: '缺映射' },
             ]}
           />
         </Space>
@@ -611,8 +665,12 @@ export default function FbeFeeManagement() {
         <Form form={editForm} layout="vertical">
           <Form.Item name="scope" label="适用范围" rules={[{ required: true, message: '请选择适用范围' }]}>
             <Select options={[
-              { value: 'SKU_DEFAULT', label: 'SKU 默认费用' },
-              { value: 'SHOP_OVERRIDE', label: '当前店铺覆盖费用', disabled: !editTarget?.shopId },
+              { value: 'PRODUCT_DEFAULT', label: 'SKU 默认费用' },
+              {
+                value: 'STORE_PRODUCT_OVERRIDE',
+                label: '当前店铺覆盖费用',
+                disabled: !editTarget?.shopId || !editTarget?.storeProductId,
+              },
             ]} />
           </Form.Item>
           <Form.Item name="feeCny" label="FBE 费用（CNY）" rules={[{ required: true, message: '请输入 FBE 费用' }]}>
@@ -637,11 +695,13 @@ export default function FbeFeeManagement() {
         {previewResult && (
           <>
             <Space wrap style={{ marginBottom: 12 }}>
-              <Tag color="success">成功 {previewResult.summary.success}</Tag>
-              <Tag>未变化 {previewResult.summary.unchanged}</Tag>
-              <Tag color="error">错误 {previewResult.summary.errors}</Tag>
-              <Tag color="warning">歧义 {previewResult.summary.ambiguous}</Tag>
-              <Tag color="default">缺映射 {previewResult.summary.unmapped}</Tag>
+              <Tag>总计 {previewResult.summary.total ?? '-'}</Tag>
+              <Tag color="processing">计划 {previewResult.summary.planned ?? '-'}</Tag>
+              <Tag color="success">更新 {previewResult.summary.updated ?? '-'}</Tag>
+              <Tag>未变化 {previewResult.summary.unchanged ?? '-'}</Tag>
+              <Tag color="error">失败 {previewResult.summary.failed ?? '-'}</Tag>
+              <Tag color="blue">影响店铺商品 {previewResult.summary.affectedStoreProductCount ?? '-'}</Tag>
+              <Tag color="purple">利润重算 {previewResult.summary.profitRecalculatedCount ?? '-'}</Tag>
             </Space>
             <Table<BatchPreviewRow>
               size="small"
