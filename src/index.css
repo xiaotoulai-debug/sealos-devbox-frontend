@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* PNK 码复制图标：静默灰，悬停时加深 */
+.pnk-cell .ant-typography-copy {
+  color: #8c8c8c !important;
+  transition: color 0.2s;
+}
+.pnk-cell .ant-typography-copy:hover {
+  color: #262626 !important;
+}
+
+/* 采购管理 - 嵌套子表：表头完全透明、弱化，融入 #f5f7fa 底色 */
+.sub-order-table .ant-table {
+  background: transparent !important;
+}
+.sub-order-table .ant-table-thead > tr > th {
+  background: transparent !important;
+  color: #9ca3af !important;
+  font-weight: 400 !important;
+  font-size: 11px !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  border-bottom: 1px solid #e8ecf0 !important;
+}
+.sub-order-table .ant-table-tbody > tr > td {
+  background: transparent !important;
+  border-bottom: 1px solid #eff2f5 !important;
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+}
+.sub-order-table .ant-table-tbody > tr:last-child > td {
+  border-bottom: none !important;
+}
+.sub-order-table .ant-table-tbody > tr:hover > td {
+  background: rgba(0, 0, 0, 0.025) !important;
+}
