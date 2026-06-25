@@ -12,6 +12,142 @@ import type { RepeatPurchaseRow } from '../components/RepeatPurchaseModal';
 import { CreateFbeShipmentModal } from './FbeShipments';
 import ProfitBreakdownPopover, { type ProfitBreakdown } from '../components/ProfitBreakdownPopover';
 
+// ─── 平台诊断类型与元数据映射 ────────────────────────────────────
+type PlatformDiagnosticCode =
+  | 'DRAFT_INCOMPLETE'
+  | 'PLATFORM_LOCKED'
+  | 'PRICE_INVALID'
+  | 'BRAND_REJECTED'
+  | 'EAN_REJECTED'
+  | 'DOCUMENTATION_REJECTED'
+  | 'TRANSLATION_FAILED'
+  | 'UPDATE_REJECTED'
+  | 'UPDATE_REVIEW_PENDING'
+  | 'MARKETPLACE_REVIEW_PENDING'
+  | 'BRAND_REVIEW_PENDING'
+  | 'DOCUMENTATION_REVIEW_PENDING'
+  | 'TRANSLATION_PENDING'
+  | 'WAITING_SALEABLE_OFFER'
+  | 'OFFER_INACTIVE'
+  | 'OFFER_EOL';
+
+interface PlatformDiagnostic {
+  code: PlatformDiagnosticCode;
+  severity: 'critical' | 'warning' | 'pending' | 'inactive';
+  saleImpact: 'blocked' | 'saleable' | 'unknown';
+  actionType: 'fix' | 'wait' | 'check' | 'none';
+  reason: string | null;
+  sources: Array<'validation_status' | 'translation_validation_status' | 'offer_validation_status' | 'offer_status'>;
+  rawValues: number[];
+}
+
+interface DiagnosticMeta {
+  label: string;
+  priority: number;
+  tagStyle: React.CSSProperties;
+  defaultReason: string;
+  suggestedAction: string;
+}
+
+const DIAGNOSTIC_META: Record<PlatformDiagnosticCode, DiagnosticMeta> = {
+  PLATFORM_LOCKED: {
+    label: '平台锁定', priority: 10,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: 'eMAG 平台已对该产品施加限制，具体原因请在 eMAG 后台查看。',
+    suggestedAction: '核查 eMAG 后台限制详情，按平台要求修正、提交材料或联系 eMAG 支持。',
+  },
+  PRICE_INVALID: {
+    label: '价格无效', priority: 11,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: '当前报价价格不符合 eMAG 平台定价规则。',
+    suggestedAction: '核对税前售价、最低价、最高价、活动价是否符合 eMAG 要求，修正后重新提交。',
+  },
+  BRAND_REJECTED: {
+    label: '品牌驳回', priority: 12,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: 'eMAG 平台驳回了该产品的品牌信息。',
+    suggestedAction: '修正品牌资料或补充品牌授权后重新提交。',
+  },
+  EAN_REJECTED: {
+    label: 'EAN 驳回', priority: 13,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: 'eMAG 平台驳回了该产品的 EAN 条码。',
+    suggestedAction: '核对 EAN 条码是否正确，修正后重新提交；如存在条码争议，可改绑已有链接或联系 eMAG 支持。',
+  },
+  DOCUMENTATION_REJECTED: {
+    label: '资料驳回', priority: 14,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: 'eMAG 平台驳回了该产品的合规资料或 listing 内容。',
+    suggestedAction: '按平台原因修正标题、图片、属性、描述等对应资料后重新提交。',
+  },
+  TRANSLATION_FAILED: {
+    label: '翻译失败', priority: 15,
+    tagStyle: { color: '#991b1b', background: '#fef2f2', borderColor: '#fecaca' },
+    defaultReason: 'eMAG 平台翻译该产品内容时失败。',
+    suggestedAction: '核查平台返回的具体原因，检查源语言标题、描述、属性及资料后重新提交，或联系 eMAG 支持。',
+  },
+  DRAFT_INCOMPLETE: {
+    label: '资料未完成', priority: 20,
+    tagStyle: { color: '#92400e', background: '#fffbeb', borderColor: '#fde68a' },
+    defaultReason: '该产品资料尚未填写完整，无法提交至 eMAG 平台。',
+    suggestedAction: '补齐标题、品牌、图片、属性、EAN、合规资料等必要字段后重新提交。',
+  },
+  UPDATE_REJECTED: {
+    label: '更新被拒', priority: 21,
+    tagStyle: { color: '#92400e', background: '#fffbeb', borderColor: '#fde68a' },
+    defaultReason: 'eMAG 平台拒绝了该产品的资料更新请求。',
+    suggestedAction: '修正本次更新内容后重新提交。',
+  },
+  UPDATE_REVIEW_PENDING: {
+    label: '更新审核中', priority: 30,
+    tagStyle: { color: '#1d4ed8', background: '#eff6ff', borderColor: '#bfdbfe' },
+    defaultReason: '资料更新已提交，正在等待 eMAG 平台审核。',
+    suggestedAction: '等待平台审核，不要重复提交；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  MARKETPLACE_REVIEW_PENDING: {
+    label: '平台审核中', priority: 31,
+    tagStyle: { color: '#1d4ed8', background: '#eff6ff', borderColor: '#bfdbfe' },
+    defaultReason: '产品正在等待 eMAG 市场官方审核。',
+    suggestedAction: '等待 eMAG 平台处理；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  BRAND_REVIEW_PENDING: {
+    label: '品牌审核中', priority: 32,
+    tagStyle: { color: '#1d4ed8', background: '#eff6ff', borderColor: '#bfdbfe' },
+    defaultReason: '品牌资质正在 eMAG 平台审核中。',
+    suggestedAction: '等待 eMAG 平台处理；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  DOCUMENTATION_REVIEW_PENDING: {
+    label: '资料审核中', priority: 33,
+    tagStyle: { color: '#1d4ed8', background: '#eff6ff', borderColor: '#bfdbfe' },
+    defaultReason: '产品合规资料正在 eMAG 平台审核中。',
+    suggestedAction: '等待 eMAG 平台处理；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  TRANSLATION_PENDING: {
+    label: '翻译处理中', priority: 34,
+    tagStyle: { color: '#6b21a8', background: '#faf5ff', borderColor: '#e9d5ff' },
+    defaultReason: '产品内容正在等待 eMAG 平台翻译处理。',
+    suggestedAction: '等待 eMAG 平台处理；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  WAITING_SALEABLE_OFFER: {
+    label: '待可售报价', priority: 35,
+    tagStyle: { color: '#1d4ed8', background: '#eff6ff', borderColor: '#bfdbfe' },
+    defaultReason: '产品已提交但 eMAG 尚未生成可售报价。',
+    suggestedAction: '检查报价是否已启用、有库存、价格有效；如长时间未变化，请到 eMAG 后台核查或联系 eMAG 支持。',
+  },
+  OFFER_INACTIVE: {
+    label: '报价已下架', priority: 40,
+    tagStyle: { color: '#64748b', background: '#f1f5f9', borderColor: '#cbd5e1' },
+    defaultReason: '该产品报价当前处于非活跃状态。',
+    suggestedAction: '核查是否主动下架或被自动下架，确认后决定是否重新激活报价。',
+  },
+  OFFER_EOL: {
+    label: 'EOL 已终止', priority: 41,
+    tagStyle: { color: '#64748b', background: '#f1f5f9', borderColor: '#cbd5e1' },
+    defaultReason: '该产品已达到销售生命周期终点（EOL），eMAG 平台已停止其销售。',
+    suggestedAction: '核查是否主动终止；如仍需销售，按 eMAG 后台规则处理或联系平台支持。',
+  },
+};
+
 const { Text } = Typography;
 
 // ─── 平台产品（已上架店铺产品）───────────────────────────────────
@@ -559,6 +695,11 @@ interface StoreProduct {
   operation_advices?:    OperationAdvice[] | null;
   __dedupeHiddenCount?:  number;
   __dedupeHiddenPnks?:   string[];
+  // ── 平台诊断（后端未返回时为 undefined/null，旧接口完全兼容）──
+  platformDiagnostics?: PlatformDiagnostic[] | null;
+  platform_diagnostics?: PlatformDiagnostic[] | null;
+  hasPlatformAttention?: boolean | null;
+  hasBlockingIssue?: boolean | null;
 }
 
 // 本地库存 SKU 信息（用于关联、毛利计算及采购计划）
@@ -887,6 +1028,92 @@ function getLinkTypeTagStyle(linkType: string): React.CSSProperties {
   if (linkType === 'RESELL') return LINK_TAG_STYLE_MAP.resell;
   if (linkType === 'OWN_BRAND_RESELL') return LINK_TAG_STYLE_MAP.ownBrandResell;
   return LINK_TAG_STYLE_MAP.default;
+}
+
+// ─── 平台诊断标签渲染 ───────────────────────────────────────────
+function getSaleImpactLabel(saleImpact: 'blocked' | 'saleable' | 'unknown'): string {
+  if (saleImpact === 'blocked') return '当前不可售';
+  if (saleImpact === 'saleable') return '当前仍可销售';
+  return '状态待确认';
+}
+
+function buildDiagnosticTooltip(d: PlatformDiagnostic): React.ReactNode {
+  const meta = DIAGNOSTIC_META[d.code];
+  if (!meta) return null;
+  const reasonText = d.reason ?? meta.defaultReason;
+  return (
+    <div style={{ maxWidth: 280 }}>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>【{meta.label}】</div>
+      <div>销售状态：{getSaleImpactLabel(d.saleImpact)}</div>
+      <div>平台原因：{reasonText}</div>
+      <div style={{ marginTop: 4 }}>建议动作：{meta.suggestedAction}</div>
+    </div>
+  );
+}
+
+const DEDUP_ROOT_CAUSE_CODES: PlatformDiagnosticCode[] = [
+  'PLATFORM_LOCKED', 'BRAND_REJECTED', 'EAN_REJECTED',
+  'DOCUMENTATION_REJECTED', 'TRANSLATION_FAILED', 'DRAFT_INCOMPLETE',
+];
+
+function deduplicateDiagnostics(diagnostics: PlatformDiagnostic[]): PlatformDiagnostic[] {
+  const codes = new Set(diagnostics.map((d) => d.code));
+  const hasRootCause = DEDUP_ROOT_CAUSE_CODES.some((c) => codes.has(c));
+  return diagnostics.filter((d) => {
+    if (d.code === 'OFFER_INACTIVE' && hasRootCause) return false;
+    return true;
+  });
+}
+
+function renderPlatformDiagnosticTags(record: StoreProduct): React.ReactNode[] {
+  const raw = record.platformDiagnostics ?? record.platform_diagnostics ?? null;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+
+  const deduped = deduplicateDiagnostics(raw);
+  const sorted = deduped
+    .filter((d) => Object.prototype.hasOwnProperty.call(DIAGNOSTIC_META, d.code))
+    .sort((a, b) => DIAGNOSTIC_META[a.code].priority - DIAGNOSTIC_META[b.code].priority);
+
+  if (sorted.length === 0) return [];
+
+  const visible = sorted.slice(0, 2);
+  const overflow = sorted.slice(2);
+  const baseTagStyle: React.CSSProperties = {
+    margin: 0, borderRadius: 999, fontSize: 11, lineHeight: '20px', paddingInline: 7, fontWeight: 700,
+  };
+
+  const tags: React.ReactNode[] = visible.map((d) => {
+    const meta = DIAGNOSTIC_META[d.code];
+    return (
+      <Tooltip key={d.code} title={buildDiagnosticTooltip(d)} overlayStyle={{ maxWidth: 320 }}>
+        <Tag style={{ ...baseTagStyle, ...meta.tagStyle }}>{meta.label}</Tag>
+      </Tooltip>
+    );
+  });
+
+  if (overflow.length > 0) {
+    const overflowContent = (
+      <div style={{ maxWidth: 280 }}>
+        {overflow.map((d) => {
+          const meta = DIAGNOSTIC_META[d.code];
+          return (
+            <div key={d.code} style={{ marginBottom: 4, lineHeight: 1.5 }}>
+              <span style={{ fontWeight: 600 }}>{meta.label}</span>：{meta.suggestedAction}
+            </div>
+          );
+        })}
+      </div>
+    );
+    tags.push(
+      <Tooltip key="__diag_overflow" title={overflowContent} overlayStyle={{ maxWidth: 320 }}>
+        <Tag style={{ ...baseTagStyle, fontWeight: 600, color: '#64748b', background: '#f1f5f9', borderColor: '#cbd5e1', cursor: 'pointer' }}>
+          +{overflow.length}
+        </Tag>
+      </Tooltip>
+    );
+  }
+
+  return tags;
 }
 
 function renderCompactInfoTag(label: string, style: React.CSSProperties) {
@@ -2062,6 +2289,7 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
         const reason = r.classificationReason ?? r.classification_reason ?? null;
         const newProductStageLabel = classDisplay?.classKey === 'NEW' ? getNewProductStageLabel(r) : null;
         const linkTypeTags = renderLinkTypeTags(r);
+        const diagnosticTags = renderPlatformDiagnosticTags(r);
         return (
           <div>
             {linkStr ? (
@@ -2095,8 +2323,9 @@ export default function PlatformProducts({ initialSearch, initialShopId }: Platf
             {partNumber && (
               <div style={{ color: '#94a3b8', fontSize: 12, marginTop: 4 }}>内部 PN：{partNumber}</div>
             )}
-            {(classDisplay || linkTypeTags) && (
+            {(classDisplay || linkTypeTags || diagnosticTags.length > 0) && (
               <Space size={[4, 4]} wrap style={{ marginTop: 4 }}>
+                {diagnosticTags}
                 {classDisplay ? (
                   <Tooltip title={reason || undefined}>
                     <Tag color={classDisplay.color} style={{ margin: 0, fontSize: 11 }}>
