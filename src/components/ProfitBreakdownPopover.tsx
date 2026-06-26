@@ -6,9 +6,16 @@ import CostCorrectionModal from './CostCorrectionModal';
 // ─── 毛利推演明细类型（export 供 StoreProduct 接口使用） ────────────────────────
 export interface ProfitBreakdown {
   salePrice?:             number | null;
+  commission?:            number | null;
   commissionRate?:        number | null;
+  effectiveCommissionRate?: number | null;
+  effectiveCommissionSource?: string | null;
   isEstimatedCommission?: boolean;
   fbe?:                   number | null;
+  effectiveFbeLocal?:     number | null;
+  effectiveFbeSource?:    string | null;
+  manualFbeOverrideCny?:  number | null;
+  manualFbeOverrideSource?: string | null;
   isEstimatedFbe?:        boolean;
   headFreightCny?:        number | null;
   purchaseCostCny?:       number | null;
@@ -16,6 +23,94 @@ export interface ProfitBreakdown {
   profitCny?:             number | null;
   profitMarginPct?:       number | null;
   isMissingVolumeWeight?: boolean;          // true = 缺体积重量，头程运费未计入
+}
+
+function readNumericField(
+  source: ProfitBreakdown,
+  camelKey: keyof ProfitBreakdown,
+  snakeKey: string,
+): number | null {
+  const camelVal = source[camelKey];
+  if (camelVal != null && Number.isFinite(Number(camelVal))) return Number(camelVal);
+  const snakeVal = (source as Record<string, unknown>)[snakeKey];
+  if (snakeVal != null && Number.isFinite(Number(snakeVal))) return Number(snakeVal);
+  return null;
+}
+
+function readStringField(
+  source: ProfitBreakdown,
+  camelKey: string,
+  snakeKey: string,
+): string | null {
+  const camelVal = (source as Record<string, unknown>)[camelKey];
+  if (typeof camelVal === 'string' && camelVal.trim()) return camelVal.trim();
+  const snakeVal = (source as Record<string, unknown>)[snakeKey];
+  if (typeof snakeVal === 'string' && snakeVal.trim()) return snakeVal.trim();
+  return null;
+}
+
+const FBE_SOURCE_TAG_MAP: Record<string, { label: string; color: string }> = {
+  MANUAL_STORE_PRODUCT: { label: '人工', color: 'green' },
+  FBE_SIMULATOR_ESTIMATE: { label: '模拟', color: 'purple' },
+  DEFAULT_CNY_7: { label: '估算', color: 'orange' },
+};
+
+function resolveFbeSourceTag(source: string | null): { label: string; color: string } {
+  if (source == null) return { label: '估算', color: 'orange' };
+  return FBE_SOURCE_TAG_MAP[source] ?? { label: '待补', color: 'default' };
+}
+
+function resolveFbeDisplay(
+  bd: ProfitBreakdown,
+  currency: string,
+): { sourceTag: { label: string; color: string }; value: ReactNode; shouldShow: boolean } {
+  const source = readStringField(bd, 'effectiveFbeSource', 'effective_fbe_source');
+  const amount = readNumericField(bd, 'effectiveFbeLocal', 'effective_fbe_local')
+    ?? readNumericField(bd, 'fbe', 'fbe');
+  const sourceTag = resolveFbeSourceTag(source);
+
+  const value = amount != null ? (
+    <span style={{ color: '#ef4444' }}>−{amount.toFixed(2)} {currency}</span>
+  ) : (
+    <span style={{ color: '#94a3b8' }}>待计算</span>
+  );
+
+  const shouldShow = amount != null || source != null || bd.isEstimatedFbe === true;
+
+  return { sourceTag, value, shouldShow };
+}
+
+function formatCommissionRatePct(rate: number): string {
+  const pct = rate > 1 ? rate : rate * 100;
+  return `${pct.toFixed(2)}%`;
+}
+
+function resolvePlatformCommissionDisplay(
+  bd: ProfitBreakdown,
+  currency: string,
+): { label: ReactNode; value: ReactNode; showEstimateTag: boolean } {
+  const rate = readNumericField(bd, 'effectiveCommissionRate', 'effective_commission_rate')
+    ?? readNumericField(bd, 'commissionRate', 'commission_rate');
+  const commission = readNumericField(bd, 'commission', 'commission');
+  const ratePctStr = rate != null ? formatCommissionRatePct(rate) : null;
+  const labelText = ratePctStr != null ? `平台佣金（${ratePctStr}）` : '平台佣金';
+
+  let value: ReactNode;
+  if (commission != null) {
+    value = (
+      <span style={{ color: '#ef4444' }}>
+        −{commission.toFixed(2)} {currency}
+      </span>
+    );
+  } else {
+    value = <span style={{ color: '#94a3b8' }}>待计算</span>;
+  }
+
+  return {
+    label: labelText,
+    value,
+    showEstimateTag: !!bd.isEstimatedCommission,
+  };
 }
 
 // ─── Props：父组件负责萃取字段，子组件只负责渲染 ────────────────────────────────
@@ -80,6 +175,9 @@ export default function ProfitBreakdownPopover({
   // CNY：优先 breakdown.profitCny，次选 profitCny prop
   const displayCny = bd?.profitCny ?? profitCny;
 
+  const platformCommissionDisplay = bd ? resolvePlatformCommissionDisplay(bd, c) : null;
+  const fbeDisplay = bd ? resolveFbeDisplay(bd, c) : null;
+
   // ── 完全无数据且无 breakdown：静默灰色占位 ────────────────────────────────────
   if (displayLocal == null && !bd) {
     return <span style={{ color: '#94a3b8', fontSize: 13 }}>—</span>;
@@ -109,30 +207,32 @@ export default function ProfitBreakdownPopover({
                 {bd.salePrice.toFixed(2)} {c}
               </Descriptions.Item>
             )}
-            {bd.commissionRate != null && bd.salePrice != null && (
+            {platformCommissionDisplay && (
               <Descriptions.Item label={
                 <span>
-                  佣金 ({(bd.commissionRate * 100).toFixed(1)}%)
-                  {bd.isEstimatedCommission && (
+                  {platformCommissionDisplay.label}
+                  {platformCommissionDisplay.showEstimateTag && (
                     <Tag color="orange" bordered={false} style={{ marginLeft: 4, fontSize: 10, padding: '0 3px' }}>估算</Tag>
                   )}
                 </span>
               }>
-                <span style={{ color: '#ef4444' }}>
-                  −{(bd.salePrice * bd.commissionRate).toFixed(2)} {c}
-                </span>
+                {platformCommissionDisplay.value}
               </Descriptions.Item>
             )}
-            {bd.fbe != null && (
+            {fbeDisplay?.shouldShow && (
               <Descriptions.Item label={
                 <span>
                   FBE 运费
-                  {bd.isEstimatedFbe && (
-                    <Tag color="orange" bordered={false} style={{ marginLeft: 4, fontSize: 10, padding: '0 3px' }}>估算</Tag>
-                  )}
+                  <Tag
+                    color={fbeDisplay.sourceTag.color}
+                    bordered={false}
+                    style={{ marginLeft: 4, fontSize: 10, padding: '0 3px' }}
+                  >
+                    {fbeDisplay.sourceTag.label}
+                  </Tag>
                 </span>
               }>
-                <span style={{ color: '#ef4444' }}>−{bd.fbe.toFixed(2)} {c}</span>
+                {fbeDisplay.value}
               </Descriptions.Item>
             )}
             {(bd.headFreightCny != null || bd.isMissingVolumeWeight) && (
